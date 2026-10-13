@@ -30,8 +30,13 @@ android {
         applicationId = "com.pyla.ai"
         minSdk = 26
         targetSdk = 34
-        versionCode = 2
-        versionName = "1.1.0"
+        versionCode = 20
+        versionName = "1.1.18-dev"
+        buildConfigField("String", "DIAGNOSTIC_URL", "\"https://pyla-logs.fetzi-ai.de/v1/reports\"")
+        val uploadCapability = providers.environmentVariable("PYLA_DIAGNOSTIC_UPLOAD_TOKEN").orElse("").get()
+        require(uploadCapability.isEmpty() || uploadCapability.matches(Regex("[A-Za-z0-9_-]{32,128}")))
+        // Upload-only capability, never a Cloudflare or private read credential.
+        buildConfigField("String", "DIAGNOSTIC_UPLOAD_TOKEN", "\"$uploadCapability\"")
         ndk { abiFilters += listOf("arm64-v8a", "x86_64") }
     }
 
@@ -50,7 +55,7 @@ android {
     }
     kotlinOptions { jvmTarget = "17" }
 
-    buildFeatures { compose = true }
+    buildFeatures { compose = true; buildConfig = true }
     packaging {
         resources { excludes += "/META-INF/{AL2.0,LGPL2.1}" }
     }
@@ -65,6 +70,8 @@ dependencies {
     implementation(libs.androidx.compose.ui)
     implementation(libs.androidx.compose.ui.graphics)
     implementation(libs.androidx.compose.ui.tooling.preview)
+    // Existing UI references icons outside the core set; use the existing BOM.
+    implementation("androidx.compose.material:material-icons-extended")
     implementation(libs.androidx.material3)
     debugImplementation(libs.androidx.compose.ui.tooling)
 

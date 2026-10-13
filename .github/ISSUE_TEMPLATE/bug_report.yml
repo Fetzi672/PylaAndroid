@@ -1,0 +1,104 @@
+name: Bug report
+description: Report a problem with the experimental PylaAndroid build.
+title: "[Bug]: "
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for reporting a problem with this **experimental** build.
+        Please check `docs/KNOWN_ISSUES.md` and `docs/FORK_STATUS.md` first — the issue may already be listed.
+        Diagnostic reports are opt-in and redacted; details are in `docs/DIAGNOSTICS.md`.
+
+  - type: input
+    id: pyla_version
+    attributes:
+      label: PylaAndroid version
+      description: The app version or build you are running (for example 1.1.18-dev).
+      placeholder: e.g. 1.1.18-dev
+    validations:
+      required: true
+
+  - type: input
+    id: device
+    attributes:
+      label: Device model
+      description: The phone or emulator you are using.
+      placeholder: e.g. Samsung Galaxy S26 Ultra
+    validations:
+      required: true
+
+  - type: input
+    id: android_version
+    attributes:
+      label: Android version
+      description: The Android version of the device.
+      placeholder: e.g. Android 15
+    validations:
+      required: true
+
+  - type: input
+    id: game_mode
+    attributes:
+      label: Game mode
+      description: The Brawl Stars mode the bot was playing when the problem happened.
+      placeholder: e.g. Solo Showdown
+    validations:
+      required: true
+
+  - type: dropdown
+    id: game_language
+    attributes:
+      label: Game language
+      description: The bot requires the game to be in English. Select the language the game was set to.
+      options:
+        - English
+        - Other
+    validations:
+      required: true
+
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      description: What you did, step by step, so the problem can be repeated.
+      placeholder: |
+        1. ...
+        2. ...
+        3. ...
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behaviour
+      description: What you expected to happen.
+    validations:
+      required: true
+
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behaviour
+      description: What actually happened.
+    validations:
+      required: true
+
+  - type: input
+    id: resolution
+    attributes:
+      label: Screen resolution (optional)
+      description: Optional. The device's screen resolution, if you know it.
+      placeholder: e.g. 1440 x 3120
+    validations:
+      required: false
+
+  - type: input
+    id: diagnostic_id
+    attributes:
+      label: Pyla diagnostic report ID (optional)
+      description: >-
+        Optional. If you generated a diagnostic report, paste its ID here.
+        Sharing a report ID publicly may allow others to read it; review before posting.
+    validations:
+      required: false

@@ -3,6 +3,7 @@ package com.pyla.ai.engine
 import android.os.SystemClock
 import com.pyla.ai.capture.CaptureService
 import com.pyla.ai.capture.InputCoordinates
+import com.pyla.ai.diagnostics.DiagnosticLog
 import com.pyla.ai.input.InputService
 
 class FrameSnapshot(
@@ -78,9 +79,14 @@ class WindowController(
         return FrameSnapshot(copy.width, copy.height, copy.rgbBuffer, copy.capturedAtMs)
     }
 
-    fun move(x: Float, y: Float) {
+    private fun inputOrWarn(operation: String): InputService? {
         val input = InputService.get()
-        if (input == null) { PylaLog.w(TAG, "move ignored: InputService not connected"); return }
+        if (input == null) PylaLog.w(TAG, "$operation ignored: InputService not connected")
+        return input
+    }
+
+    fun move(x: Float, y: Float) {
+        val input = inputOrWarn("move") ?: return
 
         // Match PC WindowController.move: press once, then only send a new logical MOVE when the
         // target changes unless debug_settings.re_apply_movement asks for repeated MOVE events.
@@ -88,15 +94,35 @@ class WindowController(
         val unchanged = areWeMoving && lastJoystickX == x && lastJoystickY == y
         if (unchanged && !reApplyMovement) return
 
+        DiagnosticLog.sample("window.joystick.requested", "x=$x y=$y")
         input.joystickMove(x, y)
         areWeMoving = true
         lastJoystickX = x
         lastJoystickY = y
     }
 
+    /** Live gameplay authority also guards renewals, not just the initial joystick DOWN. */
+    fun moveGuarded(dx: Float, dy: Float, guard: () -> Boolean) {
+        val input = inputOrWarn("moveGuarded") ?: return
+        val allowed = try { guard() } catch (_: Exception) { false }
+        if (!allowed || !dx.isFinite() || !dy.isFinite()) {
+            releaseMovement()
+            return
+        }
+        val limit = 75f
+        val m = kotlin.math.hypot(dx.toDouble(), dy.toDouble()).toFloat()
+        val sx = if (m > limit && m > 0f) dx * limit / m else dx
+        val sy = if (m > limit && m > 0f) dy * limit / m else dy
+        // Do not dedupe: even an unchanged direction must carry the current guard to the queue.
+        lastJoystickX = sx; lastJoystickY = sy; areWeMoving = true
+        DiagnosticLog.sample("window.joystick.requested", "x=$sx y=$sy guarded=true")
+        input.joystickMoveGuarded(sx, sy, guard)
+    }
+
     fun releaseMovement() {
         val input = InputService.get() ?: return
         if (areWeMoving) {
+            DiagnosticLog.event("window.joystick.release_requested", "last=($lastJoystickX, $lastJoystickY)")
             input.releaseJoystick()
             areWeMoving = false
             lastJoystickX = null
@@ -105,30 +131,48 @@ class WindowController(
     }
 
     fun swipe(x1: Float, y1: Float, x2: Float, y2: Float, durationMs: Long = 500) {
-        val input = InputService.get()
-        if (input == null) { PylaLog.w(TAG, "swipe ignored: InputService not connected"); return }
+        val input = inputOrWarn("swipe") ?: return
         PylaLog.p(TAG, "swipe ($x1,$y1) -> ($x2,$y2) ${durationMs}ms")
         input.swipeAt(x1, y1, x2, y2, durationMs)
     }
 
     fun releaseAndTap(x: Float, y: Float, holdMs: Long = 40) {
-        val input = InputService.get()
-        if (input == null) { PylaLog.w(TAG, "releaseAndTap ignored: InputService not connected"); return }
+        val input = inputOrWarn("releaseAndTap") ?: return
         PylaLog.p(TAG, "releaseAndTap at ($x,$y) hold=${holdMs}ms")
         input.releaseJoystick()
         input.tapAt(x, y, holdMs)
     }
 
-    fun click(x: Float, y: Float, delayMs: Long = 20, touchUp: Boolean = true, touchDown: Boolean = true) {
-        val input = InputService.get()
-        if (input == null) { PylaLog.w(TAG, "click ignored: InputService not connected"); return }
+    /** New navigation actions must retain their capture/lifecycle authority through the queue. */
+    fun guardedNavigationTap(x: Float, y: Float, guard: () -> Boolean) {
+        val input = inputOrWarn("guardedNavigationTap") ?: return
+        if (!guard()) return
+        releaseMovement()
+        input.releaseJoystick()
+        input.navigationTapOnce(x, y, 40L, guard)
+    }
+
+    /**
+ * Raw click at a screen point. [guard] applies only to the held-attack (`touchDown` without
+ * `touchUp`) branch; the plain tap and the release-only branch are never gated.
+ */
+    @JvmOverloads
+    fun click(
+        x: Float,
+        y: Float,
+        delayMs: Long = 20,
+        touchUp: Boolean = true,
+        touchDown: Boolean = true,
+        guard: (() -> Boolean)? = null,
+    ) {
+        val input = inputOrWarn("click") ?: return
         if (touchDown) {
             if (touchUp) {
                 PylaLog.p(TAG, "click at ($x,$y) hold=${delayMs + 20}ms")
                 input.tapAt(x, y, (delayMs + 20))
             } else {
                 PylaLog.p(TAG, "hold attack at ($x,$y)")
-                input.holdAttackAt(x, y)
+                input.holdAttackAt(x, y, guard)
             }
         } else if (touchUp) {
             PylaLog.p(TAG, "release attack key")
@@ -136,19 +180,35 @@ class WindowController(
         }
     }
 
-    fun press(key: String, delayMs: Long = 20, touchUp: Boolean = true, touchDown: Boolean = true) {
+    /**
+ * Presses a mapped screen point.
+ *
+ * [guard] is optional screen authority for the combat DOWN this call produces and defaults to
+ * `null`, which preserves the exact historical behaviour for every existing caller (lobby taps,
+ * swipes, movement, abilities). When supplied it is handed to the input service and re-evaluated
+ * there at admission, dispatch and every held continuation; a false or throwing guard fails closed.
+ * Release-only presses (`touchUp` without `touchDown`) are never gated, so a pointer can always be
+ * lifted even with no positive screen authority.
+ */
+    @JvmOverloads
+    fun press(
+        key: String,
+        delayMs: Long = 20,
+        touchUp: Boolean = true,
+        touchDown: Boolean = true,
+        guard: (() -> Boolean)? = null,
+    ) {
         val (bx, by) = InputCoordinates.press(key)
         if (bx < 0) { PylaLog.w(TAG, "press ignored: unknown key '$key'"); return }
         PylaLog.p(TAG, "press '$key' at ($bx,$by) hold=${delayMs}ms up=$touchUp down=$touchDown")
         BotStatus.action("press '$key' at ($bx,$by)")
         BotStatus.inputConnected = com.pyla.ai.input.InputService.isConnected()
         if (key in COMBAT_KEYS) {
-            val input = InputService.get()
-            if (input == null) { PylaLog.w(TAG, "press ignored: InputService not connected"); return }
+            val input = inputOrWarn("press") ?: return
             if (touchDown && touchUp) {
-                input.pressAndRelease(bx.toFloat(), by.toFloat(), delayMs + 40)
+                input.pressAndRelease(bx.toFloat(), by.toFloat(), delayMs + 40, guard)
             } else {
-                click(bx.toFloat(), by.toFloat(), delayMs, touchUp, touchDown)
+                click(bx.toFloat(), by.toFloat(), delayMs, touchUp, touchDown, guard)
             }
             return
         }

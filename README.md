@@ -1,21 +1,23 @@
-
- ## Ongoing project engine refactoring, please wait, closed beta builds will become available soon...
-
 <img src="ic_launcher_logo.png" width="150" height="150">
 
 # PylaAndroid
-PylaAndroid is a simple and easy to use without root or ADB needed PylaAI port on-device.
 
-# Important Notice ⚠️
-**You could face some issues while using this, at the current situation, I'm trying to fully rewrite the engine, please wait**
+PylaAndroid is an on-device PylaAI port for Android — no root and no ADB required.
 
-# Information
-Every PylaAI's file such as play.py, trophy_observer.py is fully rewritten in Kotlin as play.kt, trophy_observer.kt and the others.
-## How to use
+- **Upstream project:** [countryside99/PylaAndroid](https://github.com/countryside99/PylaAndroid)
+- This community contribution carries an **experimental** Android development snapshot for review. The original authors and attribution are preserved; test builds are hosted separately on the [contribution fork's releases page](https://github.com/Fetzi672/PylaAndroid/releases).
+
+Every PylaAI file such as `play.py` or `trophy_observer.py` is fully rewritten in Kotlin as `Play.kt`, `TrophyObserver.kt` and the others.
+
+# Development status ⚠️
+
+**EARLY BETA / EXPERIMENTAL.** This is not a finished product and it is **not a guarantee of unattended gameplay** on any phone. Expect bugs, and always supervise the app while it runs. Some functions are reliable, others are only partially reliable — see [docs/FORK_STATUS.md](docs/FORK_STATUS.md) and [docs/KNOWN_ISSUES.md](docs/KNOWN_ISSUES.md) before you rely on anything.
+
+# How to use
 Follow these steps to start using **PylaAI** on your Android device.
 
 ### 1. Install the App
-- Download the latest APK from the **Releases** page, or
+- Download a build from the **Releases** page when one is published, or
 - Build the APK yourself from the source code.
 
 ### 2. Grant Accessibility Permission
@@ -35,7 +37,7 @@ Settings → Apps → PylaAndroid → ⋮ (Top-right menu) → Allow Restricted 
 
 
 ### 3. Grant Screen Capture (MediaProjection) Permission
-1. Press **Start Bot**. (If you like it next to the start button there is an **overlay button** where you can activate a floating overlay to control the bot) 
+1. Press **Start Bot**. (If you like it next to the start button there is an **overlay button** where you can activate a floating overlay to control the bot)
 2. Android will display a **Screen Capture** permission dialog.
 3. Tap **Start Now** (or **Allow**, depending on your Android version).
 4. If prompted, choose **Entire Screen**.
@@ -50,6 +52,13 @@ Once pressed **Start Bot**:
 
 # Can I use on Emulator?
 Yes! You can use **PylaAndroid's APK** also directly on your android **emulator**!
+
+# Diagnostics
+
+PylaAndroid can prepare a diagnostic report to help diagnose problems. Upload is **opt-in**: you must confirm consent before anything is uploaded. Reports are redacted and are intended to exclude screenshots, raw OCR text and credentials — this is the design intent, not a promise that a report can never contain anything sensitive. Full details live in [docs/DIAGNOSTICS.md](docs/DIAGNOSTICS.md).
+
+> Sharing a report ID publicly may allow others to read it; review before posting.
+
 # Credits
 **Developers of original project:**
 - AngelFire
@@ -57,9 +66,6 @@ Yes! You can use **PylaAndroid's APK** also directly on your android **emulator*
 
 ## License
 
-As of October 13, 2026, the project is **no longer** licensed under [CC BY-NC 4.0](https://creativecommons.org/licenses/by-nc/4.0/).
+The project is distributed under the **GNU General Public License v3.0** — see [LICENSE](LICENSE) and [GNU GPL 3.0](https://www.gnu.org/licenses/gpl-3.0.en.html).
 
-Instead, the **new license** is the **GNU General Public License 3.0** [GNU GPL 3.0](https://www.gnu.org/licenses/gpl-3.0.en.html) 
-
-- **Previous** license: [CC BY-NC 4.0](https://creativecommons.org/licenses/by-nc/4.0/)
-- **Current** license: [GNU GPL 3.0](https://www.gnu.org/licenses/gpl-3.0.en.html) 
+Earlier snapshots of this fork's source baseline were released under [CC BY-NC 4.0](https://creativecommons.org/licenses/by-nc/4.0/); that applied to those snapshots only and is no longer the project license. This relicensing covers the project's own source code and **does not relicense third-party game artwork** or any asset whose rights belong to someone else.

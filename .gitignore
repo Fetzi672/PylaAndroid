@@ -1,3 +1,13 @@
+# Local caches, credentials, signing material and distributable builds
+.kotlin/
+.env
+.env.*
+*.env
+*.keystore
+*.jks
+*.apk
+*.aab
+
 # Android build artifacts
 .gradle/
 build/

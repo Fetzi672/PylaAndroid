@@ -20,7 +20,7 @@ object StateFinder {
     private val endResultsPath get() = PylaConfig.resolve("images/end_results/")
 
     private val lobbyConfig: TomlLite = PylaConfig.load("cfg/lobby_config.toml")
-    private val matchResultRegion: List<Int> = lobbyConfig.getIntArray("lobby.match_result")
+    private val matchResultRegion: List<Int> = lobbyConfig.getIntArray("template_matching.match_result")
     private val regions: TomlLite = lobbyConfig
 
     private val starDropFiles: List<String> = run {
@@ -41,11 +41,21 @@ object StateFinder {
         val key = "$path|$w|$h"
         templateCache[key]?.let { return it }
         val file = File(path)
-        if (!file.exists() && path !in templateMissingLogged) {
+        val videoCue = file.parentFile?.name == "video_state_cues"
+        if (!videoCue && !file.exists() && path !in templateMissingLogged) {
             PylaLog.w(TAG, "Template file DOES NOT EXIST on disk: $path (cwd=${System.getProperty("user.dir")})")
             templateMissingLogged.add(path)
         }
-        val raw = org.opencv.imgcodecs.Imgcodecs.imread(path)
+        val raw = if (videoCue) {
+            // Read new packaged cues directly. Bumping AssetBundler's global version would
+            // overwrite the user's retained configuration on an in-place update.
+            try {
+                val bytes = com.pyla.ai.PylaApp.ctx().assets.open("pyla/images/video_state_cues/${file.name}").use { it.readBytes() }
+                val encoded = org.opencv.core.MatOfByte(*bytes)
+                try { org.opencv.imgcodecs.Imgcodecs.imdecode(encoded, org.opencv.imgcodecs.Imgcodecs.IMREAD_COLOR) }
+                finally { encoded.release() }
+            } catch (_: Exception) { Mat() }
+        } else org.opencv.imgcodecs.Imgcodecs.imread(path)
         if (raw.empty()) {
             if (path !in templateMissingLogged) {
                 PylaLog.w(TAG, "Template imread returned empty: $path exists=${file.exists()} size=${file.length()}")
@@ -55,7 +65,7 @@ object StateFinder {
             return raw
         }
         if (path !in templateMissingLogged) PylaLog.p(TAG, "Loaded template $path (${raw.cols()}x${raw.rows()})")
-        val hr = h.toDouble() / ORIG_H
+        val hr = h.toDouble() / if (videoCue) VideoScreenStateCues.REFERENCE_HEIGHT else ORIG_H
         val resized = Mat()
         Imgproc.resize(raw, resized, Size(raw.cols() * hr, raw.rows() * hr))
         val rgb = Mat()
@@ -190,20 +200,63 @@ object StateFinder {
         return null
     }
 
+    /** Locate the actual bottom-centre elimination EXIT, not the unrelated result-screen EXIT. */
+    fun findDefeatedExit(screenshot: Mat): org.opencv.core.Point? {
+        if (getState(screenshot) != "defeated") return null
+        val w = screenshot.cols(); val h = screenshot.rows()
+        if (w <= 0 || h <= 0) return null
+        val scale = h.toDouble() / VideoScreenStateCues.REFERENCE_HEIGHT
+        // Reference ROI is centred on the observed control; height scaling preserves game UI size.
+        val x0 = (w / 2.0 - 110.0 * scale).toInt().coerceIn(0, w)
+        val x1 = (w / 2.0 + 150.0 * scale).toInt().coerceIn(0, w)
+        val y0 = (500.0 * scale).toInt().coerceIn(0, h)
+        val y1 = (585.0 * scale).toInt().coerceIn(0, h)
+        if (x1 <= x0 || y1 <= y0) return null
+        val template = loadTemplate(PylaConfig.resolve("images/video_state_cues/defeated_exit.png").absolutePath, w, h)
+        if (template.empty() || template.cols() > x1 - x0 || template.rows() > y1 - y0) return null
+        val crop = Mat(screenshot, Rect(x0, y0, x1 - x0, y1 - y0))
+        val scores = Mat()
+        try {
+            Imgproc.matchTemplate(crop, template, scores, Imgproc.TM_CCOEFF_NORMED)
+            val match = org.opencv.core.Core.minMaxLoc(scores)
+            if (!match.maxVal.isFinite() || match.maxVal <= VideoScreenStateCues.THRESHOLD) return null
+            val patch = Mat(crop, Rect(match.maxLoc.x.toInt(), match.maxLoc.y.toInt(), template.cols(), template.rows()))
+            try {
+                // Correlation alone is brightness-invariant: a darkened disabled control must not
+                // become action permission. Keep the real enabled reference's absolute pixels too.
+                val error = org.opencv.core.Core.norm(patch, template, org.opencv.core.Core.NORM_L1) /
+                    (template.total() * template.channels())
+                val referenceMean = org.opencv.core.Core.mean(template).`val`.take(3).average()
+                val liveMean = org.opencv.core.Core.mean(patch).`val`.take(3).average()
+                if (!error.isFinite() || error > 22.0 || liveMean < referenceMean * 0.85) return null
+            } finally { patch.release() }
+            return org.opencv.core.Point(x0 + match.maxLoc.x + template.cols() / 2.0,
+                y0 + match.maxLoc.y + template.rows() / 2.0)
+        } finally { scores.release(); crop.release() }
+    }
+
+    private fun videoScreenState(screenshot: Mat): String? {
+        val matches = VideoScreenStateCues.regions.filter { (name, roi) ->
+            val path = PylaConfig.resolve("images/video_state_cues/$name.png").absolutePath
+            isTemplateInRegion(screenshot, path, roi, VideoScreenStateCues.THRESHOLD)
+        }.keys
+        return VideoScreenStateCues.classify(matches)
+    }
+
     fun getState(screenshot: Mat): String {
-        findGameResult(screenshot)?.let { PylaLog.p(TAG, "State: end_$it (${screenshot.cols()}x${screenshot.rows()})"); BotStatus.currentState = "end_$it"; return "end_$it" }
-        if (inNanoNoodles(screenshot)) { PylaLog.p(TAG, "State: nano_noodles"); BotStatus.currentState = "nano_noodles"; return "nano_noodles" }
-        inStarDrop(screenshot)?.let { PylaLog.p(TAG, "State: star_drop_$it"); BotStatus.currentState = "star_drop_$it"; return "star_drop_$it" }
-        if (inTrophyReward(screenshot)) { PylaLog.p(TAG, "State: trophy_reward"); BotStatus.currentState = "trophy_reward"; return "trophy_reward" }
-        if (inPrestigeMilestone(screenshot)) { PylaLog.p(TAG, "State: prestige_milestone"); BotStatus.currentState = "prestige_milestone"; return "prestige_milestone" }
-        if (inLobby(screenshot)) { PylaLog.p(TAG, "State: lobby"); BotStatus.currentState = "lobby"; return "lobby" }
-        if (inMatchMaking(screenshot)) { PylaLog.p(TAG, "State: match_making"); BotStatus.currentState = "match_making"; return "match_making" }
-        if (inBrawlerSelection(screenshot)) { PylaLog.p(TAG, "State: brawler_selection"); BotStatus.currentState = "brawler_selection"; return "brawler_selection" }
-        if (inShop(screenshot)) { PylaLog.p(TAG, "State: shop"); BotStatus.currentState = "shop"; return "shop" }
-        if (inOfferPopup(screenshot)) { PylaLog.p(TAG, "State: popup"); BotStatus.currentState = "popup"; return "popup" }
-        if (inBrawlPass(screenshot) || inStarRoad(screenshot)) { PylaLog.p(TAG, "State: shop (brawl_pass/star_road)"); BotStatus.currentState = "shop"; return "shop" }
-        PylaLog.p(TAG, "State: match (default, nothing matched)")
-        BotStatus.currentState = "match"
-        return "match"
+        findGameResult(screenshot)?.let { PylaLog.p(TAG, "State: end_$it (${screenshot.cols()}x${screenshot.rows()})"); return "end_$it" }
+        videoScreenState(screenshot)?.let { return it }
+        if (inNanoNoodles(screenshot)) { PylaLog.p(TAG, "State: nano_noodles"); return "nano_noodles" }
+        inStarDrop(screenshot)?.let { PylaLog.p(TAG, "State: star_drop_$it"); return "star_drop_$it" }
+        if (inTrophyReward(screenshot)) { PylaLog.p(TAG, "State: trophy_reward"); return "trophy_reward" }
+        if (inPrestigeMilestone(screenshot)) { PylaLog.p(TAG, "State: prestige_milestone"); return "prestige_milestone" }
+        if (inLobby(screenshot)) { PylaLog.p(TAG, "State: lobby"); return "lobby" }
+        if (inMatchMaking(screenshot)) { PylaLog.p(TAG, "State: match_making"); return "match_making" }
+        if (inBrawlerSelection(screenshot)) { PylaLog.p(TAG, "State: brawler_selection"); return "brawler_selection" }
+        if (inShop(screenshot)) { PylaLog.p(TAG, "State: shop"); return "shop" }
+        if (inOfferPopup(screenshot)) { PylaLog.p(TAG, "State: popup"); return "popup" }
+        if (inBrawlPass(screenshot) || inStarRoad(screenshot)) { PylaLog.p(TAG, "State: shop (brawl_pass/star_road)"); return "shop" }
+        PylaLog.p(TAG, "State: unknown (no positive menu evidence)")
+        return "unknown"
     }
 }
