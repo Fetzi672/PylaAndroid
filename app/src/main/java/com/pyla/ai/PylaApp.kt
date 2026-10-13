@@ -2,7 +2,8 @@ package com.pyla.ai
 
 import android.app.Application
 import android.content.Context
-import android.util.Log
+import com.pyla.ai.engine.PylaLog as Log
+import com.pyla.ai.diagnostics.DiagnosticLog
 import org.opencv.android.OpenCVLoader
 
 class PylaApp : Application() {
@@ -10,10 +11,11 @@ class PylaApp : Application() {
     override fun onCreate() {
         super.onCreate()
         instance = this
-        android.util.Log.i("Pyla", "=== PylaAI starting ===")
+        DiagnosticLog.event("app.start", "process_start")
+        Log.i("Pyla", "=== PylaAI starting ===")
         try {
             val ok = OpenCVLoader.initLocal()
-            android.util.Log.i("Pyla", "OpenCV initLocal: $ok")
+            Log.i("Pyla", "OpenCV initLocal: $ok")
         } catch (t: Throwable) {
             Log.e(TAG, "OpenCV init failed", t)
         }
