@@ -17,10 +17,11 @@ import android.media.projection.MediaProjectionManager
 import android.os.Build
 import android.os.IBinder
 import android.os.SystemClock
-import android.util.Log
+import com.pyla.ai.engine.PylaLog as Log
 import android.view.Display
 import androidx.core.app.NotificationCompat
 import com.pyla.ai.R
+import com.pyla.ai.diagnostics.DiagnosticLog
 import com.pyla.ai.engine.DeviceProfile
 import java.util.concurrent.locks.ReentrantLock
 import kotlin.concurrent.withLock
@@ -171,7 +172,10 @@ class CaptureService : Service() {
         @Suppress("DEPRECATION")
         projection = mgr.getMediaProjection(resultCode, data).also { p ->
             p.registerCallback(object : MediaProjection.Callback() {
-                override fun onStop() { Log.w(TAG, "MediaProjection stopped"); stopCapture() }
+                override fun onStop() {
+                    DiagnosticLog.event("capture.projection_stopped", "size=${width}x$height")
+                    Log.w(TAG, "MediaProjection stopped"); stopCapture()
+                }
             }, null)
         }
 
@@ -186,6 +190,7 @@ class CaptureService : Service() {
         InputCoordinates.setCaptureSize(width, height)
         (getSystemService(Context.DISPLAY_SERVICE) as DisplayManager)
             .registerDisplayListener(displayListener, handler)
+        DiagnosticLog.event("capture.started", "size=${width}x$height")
         Log.i(TAG, "Capture started ${width}x${height}")
     }
 
@@ -250,6 +255,7 @@ class CaptureService : Service() {
         projection = null
         try { activeProjection?.stop() } catch (_: Throwable) {}
         frameLock.withLock { latest = null; latestTimestampMs = 0 }
+        DiagnosticLog.event("capture.stopped", "size=${width}x$height")
         Log.i(TAG, "Capture stopped")
     }
 

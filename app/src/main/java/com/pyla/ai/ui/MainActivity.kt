@@ -81,7 +81,7 @@ class MainActivity : ComponentActivity() {
                     }
 
                     // Shared brawler queue, loaded once and edited on the Playstyles tab.
-                    val queue = androidx.compose.runtime.mutableStateListOf<QueueEntryUi>()
+                    val queue = remember { androidx.compose.runtime.mutableStateListOf<QueueEntryUi>() }
                     var queueLoaded by remember { mutableStateOf(false) }
                     LaunchedEffect(assetsReady) {
                         if (assetsReady && !queueLoaded) {
@@ -216,7 +216,7 @@ class MainActivity : ComponentActivity() {
 
     private fun stopBot() {
         BotEngine.instance?.stop()
-        CaptureService.stop(this)
+        stopService(Intent(this, CaptureService::class.java))
     }
 
     companion object { const val ACTION_REQUEST_START = "com.pyla.ai.overlay.REQUEST_START" }

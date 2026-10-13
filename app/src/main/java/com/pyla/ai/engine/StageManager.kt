@@ -1,7 +1,9 @@
 package com.pyla.ai.engine
 
-import android.util.Log
+import com.pyla.ai.engine.PylaLog
+import com.pyla.ai.engine.PylaLog as Log
 import com.pyla.ai.config.PylaConfig
+import com.pyla.ai.diagnostics.DiagnosticLog
 import org.opencv.core.Mat
 import org.opencv.imgcodecs.Imgcodecs
 import kotlin.concurrent.thread
@@ -12,10 +14,45 @@ class StageManager(
     val windowController: WindowController,
     val getState: () -> String?,
     val playstyleInfo: Map<String, Any>,
+    private val navigationAllowed: () -> Boolean = { false },
 ) {
     companion object { private const val TAG = "PylaStage" }
 
     val trophyObserver = TrophyObserver()
+    private val defeatedExitGate = DefeatedExitGate()
+    @Volatile private var closed = false
+
+    fun invalidateNavigation() = defeatedExitGate.invalidate(android.os.SystemClock.elapsedRealtime())
+    fun navigationStateObserved(state: String?) = defeatedExitGate.screenChanged(state)
+
+    /** Visible enabled EXIT only, with two fresh captures and a queue-time revocation guard. */
+    private fun exitDefeated() {
+        if (closed || !navigationAllowed() || getState() != "defeated") return
+        val generation = defeatedExitGate.generation()
+        val geometry = com.pyla.ai.capture.InputCoordinates.geometryGeneration
+        val frame = windowController.screenshot()
+        val mat = PylaUtils.frameToMat(frame)
+        val target = try { StateFinder.findDefeatedExit(mat) } finally { mat.release() }
+        val now = android.os.SystemClock.elapsedRealtime()
+        val valid = target != null && !closed && navigationAllowed() && getState() == "defeated" &&
+            com.pyla.ai.capture.InputCoordinates.geometryGeneration == geometry
+        val observation = DefeatedExitGate.Observation(
+            frame.capturedAtMs, frame.width, frame.height,
+            target?.x?.toFloat() ?: 0f, target?.y?.toFloat() ?: 0f, valid, geometry,
+        )
+        val ticket = defeatedExitGate.observe(observation, generation, now) ?: return
+        val guard = {
+            !closed && navigationAllowed() && getState() == "defeated" &&
+                com.pyla.ai.capture.InputCoordinates.geometryGeneration == geometry &&
+                com.pyla.ai.capture.InputCoordinates.captureWidth == frame.width &&
+                com.pyla.ai.capture.InputCoordinates.captureHeight == frame.height &&
+                defeatedExitGate.allows(ticket, android.os.SystemClock.elapsedRealtime())
+        }
+        if (!guard()) return
+        DiagnosticLog.event("navigation.defeated_exit", "reason=visible_enabled_control attempt=${ticket.serial}")
+        BotStatus.action("Pressing visible EXIT")
+        windowController.guardedNavigationTap(observation.x, observation.y, guard)
+    }
 
     private val playAgainOnWin: Boolean get() =
         PylaUtils.configBool(PylaConfig.load("cfg/bot_config.toml").opt("play_again_on_win"), false)
@@ -33,12 +70,15 @@ class StageManager(
     }
 
     fun doState(state: String) {
+        defeatedExitGate.screenChanged(state)
+        DiagnosticLog.event("stage.do_state", "state=$state queue=${brawlersPickData.size}")
         PylaLog.p(TAG, "doState: $state")
         BotStatus.action("doState: $state")
         when (state) {
             "shop", "brawler_selection" -> quitShop()
             "popup" -> closePopUp()
-            "match", "match_making" -> {}
+            "defeated" -> exitDefeated()
+            "match", "match_making", "match_start", "result_preview", "end_ranked", "transition" -> {}
             "lobby" -> startGame()
             "star_drop_regular", "star_drop_angelic", "star_drop_demonic", "star_drop_starr_nova" ->
                 clickStarDrop(state.removePrefix("star_drop_"))
@@ -63,6 +103,7 @@ class StageManager(
         val pushUntil = toInt(brawlersPickData[0]["push_until"], 1000)
 
         if (value >= pushUntil) {
+            DiagnosticLog.event("stage.push_target_reached", "brawler=$currentBrawler $typeOfPush=$value target=$pushUntil")
             Log.i(TAG, "Brawler $currentBrawler reached target ($value >= $pushUntil)")
             if (brawlersPickData.size <= 1) {
                 Log.w(TAG, "No more brawlers. Stopping.")
@@ -73,7 +114,7 @@ class StageManager(
             val nextBrawler = next["brawler"].toString()
             if (toBool(next["automatically_pick"], false)) {
                 val result = lobbyAutomator.selectBrawler(nextBrawler)
-                if (result == "aborted" || result == "stuck") return
+                if (result != "success") throw BrawlerSelectionFailedException(result)
                 if (result == "success") {
                     trophyObserver.changeTrophies(toInt(next["trophies"], 0))
                     trophyObserver.currentWins = toInt(next["wins"], 0)
@@ -220,16 +261,7 @@ class StageManager(
         }
 
         if (playAgainOnWin && parsedResult?.result == MatchResultKind.VICTORY) {
-            Log.i(TAG, "Waiting for match to start...")
-            val startWait = nowSec()
-            while (nowSec() - startWait < 25) {
-                if (currentStateFromScreen() == "match") { Log.i(TAG, "Match started successfully!"); return }
-                try { Thread.sleep(500) } catch (_: InterruptedException) {}
-            }
-            // PC parity: when play-again does not lead to a match, restart the game instead
-            // of risking sitting on a stuck screen forever.
-            Log.w(TAG, "Match did not start within 25s, restarting the game.")
-            relaunchGame()
+            handOffToGameplayVerifier()
         } else if (nowSec() - endScreenTime > 35) {
             // PC parity: the end screen never went away (frozen game / missed clicks),
             // restart the game so the bot can never get stuck here.
@@ -237,6 +269,13 @@ class StageManager(
             relaunchGame()
         }
         Log.i(TAG, "Game has ended, current=$currentState")
+    }
+
+    /** Return observation to the main loop; only Play's fresh player evidence may admit Match. */
+    private fun handOffToGameplayVerifier() {
+        windowController.releaseMovement()
+        BotStatus.publish(RuntimeState.UNKNOWN, VerificationPhase.AWAIT_PLAYER, false)
+        DiagnosticLog.event("stage.play_again_handoff", "verifier=gameplay_evidence relaunch=false")
     }
 
     private fun relaunchGame() {
@@ -309,6 +348,8 @@ class StageManager(
     }
 
     fun close() {
+        closed = true
+        invalidateNavigation()
         closePopupIcon?.release()
         closePopupIcon = null
     }

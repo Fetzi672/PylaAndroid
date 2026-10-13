@@ -28,17 +28,21 @@ object InputCoordinates {
     @Volatile private var captureH: Int = BASE_H
     @Volatile private var screenW: Int = 0
     @Volatile private var screenH: Int = 0
+    private val geometryEpoch = java.util.concurrent.atomic.AtomicLong()
+    val geometryGeneration: Long get() = geometryEpoch.get()
 
     val widthRatio: Float get() = captureW.toFloat() / BASE_W
     val heightRatio: Float get() = captureH.toFloat() / BASE_H
     val scaleFactor: Float get() = minOf(widthRatio, heightRatio)
 
-    fun setCaptureSize(w: Int, h: Int) {
+    @Synchronized fun setCaptureSize(w: Int, h: Int) {
+        if (captureW != w.coerceAtLeast(1) || captureH != h.coerceAtLeast(1)) geometryEpoch.incrementAndGet()
         captureW = w.coerceAtLeast(1)
         captureH = h.coerceAtLeast(1)
     }
 
-    fun setScreenSize(w: Int, h: Int) {
+    @Synchronized fun setScreenSize(w: Int, h: Int) {
+        if (screenW != w.coerceAtLeast(1) || screenH != h.coerceAtLeast(1)) geometryEpoch.incrementAndGet()
         screenW = w.coerceAtLeast(1)
         screenH = h.coerceAtLeast(1)
     }
