@@ -1,9 +1,9 @@
 # Fork status — current Android development snapshot
 
 - **Upstream:** https://github.com/countryside99/PylaAndroid
-- **Development build:** `1.1.18-dev (20)`, planned tag `v1.1.18-dev`. Matching experimental APKs belong on the [contribution fork's releases page](https://github.com/Fetzi672/PylaAndroid/releases); verify the tag and checksum before installing. A contribution PR is not an upstream release.
+- **Beta release candidate:** `3.0.1-beta (21)`, tag `v3.0.1`. Matching beta APKs belong on the [original project's releases page](https://github.com/countryside99/PylaAndroid/releases); verify the tag and checksum before installing. The earlier `1.1.18-dev (20)` test build remains on the contribution fork.
 
-This community contribution brings the current **experimental** Android source snapshot upstream for review. It is a development candidate, not an upstream release and **not a guarantee of unattended gameplay on any phone**. For concrete defects and limits, see [KNOWN_ISSUES.md](KNOWN_ISSUES.md); for diagnostics, see [DIAGNOSTICS.md](DIAGNOSTICS.md).
+This community contribution is now available as an **experimental beta** in the original project. It is not a stable production release and **not a guarantee of unattended gameplay on any phone**. For concrete defects and limits, see [KNOWN_ISSUES.md](KNOWN_ISSUES.md); for diagnostics, see [DIAGNOSTICS.md](DIAGNOSTICS.md).
 
 ## Status: EARLY BETA / EXPERIMENTAL
 
@@ -52,5 +52,7 @@ Diagnostic upload is opt-in and requires explicit Confirm/Cancel consent. Report
 Prior hosted CI on fork source `5dbc1a5f426b91c643ad0ab76355465ce1a3c553`: **448 JVM tests passed, 15 optional image-fixture checks were skipped, and Android lint reported 0 errors and 40 warnings.** This is historical evidence, not the final-head verdict for this contribution; see the PR checks and release notes for the actual source-matched results. The skipped checks are the optional full-reference image comparisons in `BrawlerDetailSelectTest`, gated behind `PYLA_DETAIL_FIXTURE_DIR`; hosted CI does not exercise them, so a green JVM run is not a recognition-accuracy or gameplay proof. Additional private composed-selector cases are run on the development host. No private reports, fixture recordings, credentials, signing material or APKs are included in this contribution.
 
 ## Build boundaries
+
+**Installation/signing:** This beta preserves the signing certificate of the contribution build `1.1.18-dev (20)`, not the different certificate used by the original `v3.0.0` APK. Android cannot update that original installation in place with this APK. Preserve needed configuration before uninstalling the old app; then install this beta and grant the required permissions again. Uninstalling can remove app data.
 
 Use Java 17, Android SDK 34 and Gradle 8.9. `PYLA_DIAGNOSTIC_UPLOAD_TOKEN` is supplied externally for an owner diagnostic build and is never committed; an ordinary build without it cannot use the private upload path.
