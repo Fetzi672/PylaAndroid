@@ -57,4 +57,9 @@ Yes! You can use **PylaAndroid's APK** also directly on your android **emulator*
 
 ## License
 
-This project is **not permitted to be sold or monetized** under [CC BY-NC 4.0](https://creativecommons.org/licenses/by-nc/4.0/).
+As of October 13, 2026, the project is **no longer** licensed under [CC BY-NC 4.0](https://creativecommons.org/licenses/by-nc/4.0/).
+
+Instead, the **new license** is the **GNU General Public License 3.0** [GNU GPL 3.0](https://www.gnu.org/licenses/gpl-3.0.en.html) 
+
+- **Previous** license: [CC BY-NC 4.0](https://creativecommons.org/licenses/by-nc/4.0/)
+- **Current** license: [GNU GPL 3.0](https://www.gnu.org/licenses/gpl-3.0.en.html) 
