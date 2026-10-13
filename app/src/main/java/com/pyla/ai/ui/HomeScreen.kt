@@ -231,6 +231,11 @@ fun HomeScreen(
 
         Spacer(Modifier.height(16.dp))
 
+        // Event log + consent-gated private diagnostic submission
+        DiagnosticPanel()
+
+        Spacer(Modifier.height(16.dp))
+
         // Quick actions
         PylaCard {
             SectionHeader(Icons.Default.ArrowOutward, "Quick actions", PylaColors.Purple)

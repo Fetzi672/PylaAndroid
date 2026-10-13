@@ -1,8 +1,14 @@
 package com.pyla.ai.engine
 
-import android.util.Log
+import android.os.Handler
+import android.os.Looper
+import com.pyla.ai.capture.InputCoordinates
+
+import com.pyla.ai.engine.PylaLog
+import com.pyla.ai.engine.PylaLog as Log
 import com.pyla.ai.config.PylaConfig
 import com.pyla.ai.config.TomlLite
+import com.pyla.ai.diagnostics.DiagnosticLog
 import com.pyla.ai.pyla.NativeFn
 import com.pyla.ai.pyla.Py
 import com.pyla.ai.pyla.PyDict
@@ -24,7 +30,6 @@ import kotlin.math.PI
 import kotlin.math.round
 import kotlin.math.sin
 import kotlin.math.sqrt
-import kotlin.random.Random
 
 class Play(
     val windowController: WindowController,
@@ -32,13 +37,26 @@ class Play(
     tileDetectorModelPath: String,
     closeTileDetectorModelPath: String,
     var pylaScript: PylaScript? = null,
+    /**
+     * Live authority check for gameplay input, bound by the host to its stop/pause state. Every
+     * attack DOWN is gated on it at dispatch time, so a queued command cannot fire after the
+     * engine stopped producing input.
+     */
+    private val inputAllowed: () -> Boolean = { true },
 ) {
     companion object {
         private const val TAG = "PylaPlay"
+        /**
+         * Max age of the capture that a gameplay decision may be derived from. Older frames can no
+         * longer prove that the player is where the detections say, so they never authorize input.
+         */
+        const val MAX_EVIDENCE_FRAME_AGE_MS = 3_000L
+
+        /** Movement smaller than this is not a meaningful joystick vector. */
         private const val MIN_SIGNIFICANT_MOVEMENT = 2.0
-        // Rotation of dismissal buttons tried on unrecognized "match"-looking screens
-        // (reward splashes, claim dialogs, "got it" popups, tap-anywhere screens).
-        private val DISMISSAL_KEYS = listOf("proceed", "proceed", "continue_or_equip", "middle_got_it", "middle")
+
+        /** Rate limit for reporting the observed screen back to the engine. */
+        private const val STATE_REPORT_INTERVAL_MS = 1_000L
     }
 
     private fun botConfig(): TomlLite = PylaConfig.load("cfg/bot_config.toml")
@@ -70,7 +88,6 @@ class Play(
     private val gadgetTresholdSec: Double get() = timeConfig().getDouble("gadget", 0.1)
     private val hyperchargeTresholdSec: Double get() = timeConfig().getDouble("hypercharge", 0.1)
     private val wallsTresholdSec: Double get() = timeConfig().getDouble("wall_detection", 0.1)
-    private val noDetectionProceedDelaySec: Double get() = timeConfig().getDouble("no_detection_proceed", 8.0)
 
     private val gadgetPixelsMin: Long get() = botConfig().getDouble("gadget_pixels_minimum", 1300.0).toLong()
     private val hyperchargePixelsMin: Long get() = botConfig().getDouble("hypercharge_pixels_minimum", 1800.0).toLong()
@@ -78,9 +95,6 @@ class Play(
     private val wallDetectionConfidence: Float get() = botConfig().getDouble("wall_detection_confidence", 0.5).toFloat()
     private val entityDetectionConfidence: Float get() = botConfig().getDouble("entity_detection_confidence", 0.65).toFloat()
     private val secondsToHoldAttackAfterReachingMax: Double get() = botConfig().getDouble("seconds_to_hold_attack_after_reaching_max", 1.5)
-    private val minimumMovementDelay: Double get() = botConfig().getDouble("minimum_movement_delay", 0.1)
-    private val idleWanderDelaySec: Double get() = botConfig().getDouble("idle_wander_delay", 3.0)
-    private val wanderChangeIntervalSec: Double get() = botConfig().getDouble("wander_change_interval", 2.5)
 
     private val fixMovementKeys = FixMovementState(
         delayToTrigger = PylaConfig.load("cfg/bot_config.toml").getDouble("unstuck_movement_delay", 2.4),
@@ -110,21 +124,47 @@ class Play(
     private var isGadgetReady: Boolean = false
     private var isHyperchargeReady: Boolean = false
     private var isSuperReady: Boolean = false
-    private var timeSinceLastProceeding: Double = nowSec()
 
     val timeSinceDetections = HashMap<String, Double>().apply {
         put("player", nowSec()); put("enemy", nowSec())
     }
 
+    /**
+     * Gameplay admission. A classifier answer alone never authorizes input: it needs fresh, current
+     * player evidence from two distinct frames (see [GameplayEvidenceGate]).
+     */
+    val gameplayEvidence = GameplayEvidenceGate(MAX_EVIDENCE_FRAME_AGE_MS)
+
+    /**
+     * Last script result, kept only as a value. It is never resumed as movement input: without
+     * current positive player evidence no gameplay input is produced at all, so a stale vector can
+     * not bypass the directed planner.
+     */
     private var lastMovement: Any? = ""
     private var lastMovementChangeTime: Double = nowSec()
-    private var idleSince: Double = nowSec()
-    private var wanderAngle: Double = Random.nextDouble(0.0, 2.0 * PI)
-    private var wanderChangeTime: Double = nowSec()
+
+    /** Continuous intent is allowed only during fresh, positively admitted gameplay. */
+    private val continuousPlanner = ContinuousMovementPlanner()
+    private val sceneProgress = SceneProgressTracker()
+    @Volatile private var gameplayGeometry: Long = -1L
+    private val combatHandler by lazy { Handler(Looper.getMainLooper()) }
+    private var attackPulse: Runnable? = null
+    private var pulseBrawler: String = ""
+    internal var postCombatPulse: (Runnable, Long) -> Unit = { task, delay -> combatHandler.postDelayed(task, delay); Unit }
+    internal var removeCombatPulse: (Runnable) -> Unit = { task -> combatHandler.removeCallbacks(task) }
 
     private var frame: Mat? = null
 
-    private fun nowSec() = System.currentTimeMillis() / 1000.0
+    internal fun nowSec() = System.currentTimeMillis() / 1000.0
+
+    /** Monotonic "now" for freshness checks; overridable in host tests. */
+    internal var monotonicNowMs: () -> Long = { android.os.SystemClock.elapsedRealtime() }
+
+    /**
+     * Current-frame screen classification, injected for testability. Defaults to the production
+     * StateFinder; an "unknown" classification must never be produced by a known menu screen.
+     */
+    internal var classifyFrame: (Mat) -> String = { StateFinder.getState(it) }
 
 
     fun getEntityPos(entity: FloatArray): Pair<Double, Double> =
@@ -343,6 +383,12 @@ class Play(
         return round(angle / (PI / 8)).toInt() and 15
     }
 
+    /**
+     * Retained legacy rotation helper (kept for regression API compatibility).
+     *
+     * It is *not* part of the production movement path any more: production movement comes only from
+     * [DirectedMovementPlanner] behind positive gameplay evidence. Nothing in [main] calls this.
+     */
     fun unstuckMovementIfNeeded(movement: Pair<Double, Double>, currentTime: Double = nowSec()): Pair<Double, Double> {
         val dirKey = movementDirectionKey(movement)
         if (dirKey == null) {
@@ -505,7 +551,33 @@ class Play(
     }
 
 
-    fun main(frame: Mat, brawler: String, state: String?, onStateChange: (String) -> Unit) {
+    /**
+     * Per-frame gameplay entry point.
+     *
+     * @param state classifier answer that caused the caller to invoke this method ("match" or
+     *        "unknown"). A classifier answer is never proof of gameplay on its own.
+     * @param capturedAtMs capture timestamp of [frame] (`snapshot.capturedAtMs`), used for the
+     *        freshness and two-distinct-frames checks. Required: there is no fabricated default.
+     * @param onStateChange reports the screen that this frame actually shows, so the engine can
+     *        leave "match" when the player is not really detected.
+     */
+    fun main(
+        frame: Mat,
+        brawler: String,
+        state: String?,
+        capturedAtMs: Long,
+        onStateChange: (String) -> Unit,
+    ) {
+        val issuingThread = Thread.currentThread()
+        val frameGeneration = synchronized(this) {
+            val geometry = InputCoordinates.geometryGeneration
+            if (gameplayGeometry != geometry) {
+                resetCombat()
+                gameplayEvidence.reset()
+                gameplayGeometry = geometry
+            }
+            combatGeneration
+        }
         this.frame = frame
         val currentTime = nowSec()
         var data: MutableMap<String, MutableList<FloatArray>> = getMainData(frame)
@@ -519,38 +591,53 @@ class Play(
             data["wall"] = lastWallsData.toMutableList(); data["bush"] = lastBushesData.toMutableList()
         }
 
+        // Observe raw detections before the missing-player path discards them.
+        DiagnosticLog.event("detection.player_presence", "present=${!data["player"].isNullOrEmpty()}")
+        DiagnosticLog.sample("detection.raw", "player=${data["player"]?.size ?: 0} enemy=${data["enemy"]?.size ?: 0} teammate=${data["teammate"]?.size ?: 0} state=$state")
         data = validateGameData(data) ?: HashMap()
         trackNoDetections(data)
 
-        val hasPlayer = !data["player"].isNullOrEmpty()
-        if (hasPlayer) {
-            timeSincePlayerLastFound = currentTime
+        val playerBoxes = data["player"]?.size ?: 0
+        val boxValid = GameplayEvidenceGate.validPlayerBox(data["player"]?.firstOrNull(), frame.cols(), frame.rows())
+        if (playerBoxes > 0) timeSincePlayerLastFound = currentTime
+
+        val nowMs = monotonicNowMs()
+        // "unknown" may only continue observation when the current frame itself is not a known menu
+        // screen; a known menu is positive evidence that gameplay is not running.
+        var reportedState: String? = null
+        val current = classifyFrame(frame)
+        reportedState = current
+        val statePermitted = (state == "match" || state == "unknown") && !isMenuScreen(current)
+
+        val evidence = if (statePermitted) {
+            gameplayEvidence.observe(statePermitted, playerBoxes, boxValid, capturedAtMs, nowMs)
+        } else {
+            gameplayEvidence.observeMenuScreen()
         }
 
-        if (!hasPlayer || state != "match") {
-            if (state == "match") {
-                applyBlindAntiIdle(currentTime)
-            } else if (currentTime - timeSincePlayerLastFound > 1.0) {
-                windowController.releaseMovement()
-            }
-            if (currentTime - timeSinceLastProceeding > noDetectionProceedDelaySec) {
-                val currentState = StateFinder.getState(frame)
-                if (currentState != "match") {
-                    blindProceedAttempts = 0
-                    onStateChange(currentState)
-                    timeSinceLastProceeding = currentTime
-                } else {
-                    blindProceedAttempts++
-                    Log.i(TAG, "haven't detected the player in a while, dismissing screen (attempt $blindProceedAttempts)")
-                    pressDismissalButton(blindProceedAttempts)
-                    timeSinceLastProceeding = currentTime
-                }
-            }
+        if (!evidence.admitted) {
+            resetCombat()
+            // No positive player evidence: no gameplay input at all. Release the joystick instead of
+            // keeping a stale vector alive, and never dismiss an unrecognized screen blindly.
+            windowController.releaseMovement()
+            lastMovement = ""
+            val runtimeState = if (state == "unknown") RuntimeState.UNKNOWN else RuntimeState.MATCH
+            val phase = if (evidence.reason == GameEvidenceReason.PLAYER_MISSING ||
+                evidence.reason == GameEvidenceReason.PLAYER_AMBIGUOUS ||
+                evidence.reason == GameEvidenceReason.PLAYER_BOX_INVALID
+            ) VerificationPhase.AWAIT_PLAYER else VerificationPhase.VERIFY_STATE
+            BotStatus.publish(runtimeState, phase, verified = false)
+            DiagnosticLog.event("gameplay.admission", "reason=${evidence.reason.name} phase=${phase.name}")
+            maybeReportObservedState(if (statePermitted) "unknown" else reportedState, nowMs, onStateChange)
             return
         }
-
-        timeSinceLastProceeding = currentTime
-        blindProceedAttempts = 0
+        maybeReportObservedState("match", nowMs, onStateChange)
+        if (closed || Thread.currentThread().isInterrupted || !inputAllowed()) {
+            resetCombat()
+            gameplayEvidence.reset()
+            windowController.releaseMovement()
+            return
+        }
 
         if (currentTime - timeSinceHyperchargeChecked > hyperchargeTresholdSec) {
             isHyperchargeReady = checkIfHyperchargeReady(frame)
@@ -566,164 +653,334 @@ class Play(
         }
 
         currentBrawler = brawler
-        val movement = computeScriptMovement(brawler, data)
-        applyAntiIdleMovement(movement, currentTime, data)
-    }
-
-    private fun computeScriptMovement(brawler: String, data: Map<String, MutableList<FloatArray>>): Pair<Double, Double>? {
-        val script = pylaScript ?: return null
-        val playerBox = data["player"]?.firstOrNull() ?: return null
-        val context = buildContext(brawler, playerBox, data)
-
-        val raw = script.run(context)
-        var move = pyToPair(raw)
-        if (move == null) {
-            lastMovement = ""
-            return null
+        for (key in listOf("enemy", "teammate")) {
+            data[key] = (data[key] ?: emptyList()).filter {
+                GameplayEvidenceGate.validPlayerBox(it, frame.cols(), frame.rows())
+            }.toMutableList()
         }
-        move = clampMovement(move)
-        val currentTime = nowSec()
-        if (!movementEquals(move, lastMovement)) {
-            if (currentTime - lastMovementChangeTime >= minimumMovementDelay) {
-                lastMovement = move
-                lastMovementChangeTime = currentTime
-            } else {
-                val prev = lastMovement
-                if (prev is Pair<*, *>) {
-                    @Suppress("UNCHECKED_CAST")
-                    move = prev as Pair<Double, Double>
-                } else {
-                    return null
-                }
-            }
-        } else {
-            lastMovementChangeTime = currentTime
+        synchronized(this) {
+            if (frameGeneration != combatGeneration || closed || issuingThread.isInterrupted || !inputAllowed()) return
+            // No enemy/range/line-of-sight requirement for basic auto attack. Specials retain targets.
+            basicAttackEligible = true
+            activeGameplayFrameMs = capturedAtMs
+            activeGameplayTarget = !data["enemy"].isNullOrEmpty() || !data["teammate"].isNullOrEmpty()
         }
-        return unstuckMovementIfNeeded(move, currentTime)
-    }
-
-    private fun movementEquals(a: Pair<Double, Double>, b: Any?): Boolean {
-        if (b !is Pair<*, *>) return false
-        return a.first == b.first && a.second == b.second
-    }
-
-    /**
-     * In-match inactivity guard. Brawl Stars only ever kicks for idleness inside a match
-     * (the lobby never kicks), so while the state is "match" the character must never
-     * stand still long enough for the inactivity timer to fire:
-     *  - a significant playstyle movement is forwarded untouched,
-     *  - a null/tiny movement keeps the previous joystick direction for a short grace
-     *    period (mirroring the PC keyboard behaviour where held keys stay pressed,
-     *    instead of lifting the virtual joystick and freezing the character),
-     *  - after idle_wander_delay seconds of stillness a wander movement is forced, so the
-     *    inactivity timer is always reset long before the game can replace us with a bot.
-     */
-    private fun applyAntiIdleMovement(
-        movement: Pair<Double, Double>?,
-        currentTime: Double,
-        data: Map<String, MutableList<FloatArray>>
-    ) {
-        if (movement != null && hypot(movement.first, movement.second) >= MIN_SIGNIFICANT_MOVEMENT) {
-            if (antiIdleForcing) {
-                antiIdleForcing = false
-                PylaLog.p(TAG, "anti-idle: playstyle movement resumed")
-            }
-            idleSince = currentTime
-            doMovement(movement)
-            return
-        }
-        if (currentTime - idleSince < idleWanderDelaySec) {
-            // Grace period: keep the joystick exactly as it is (do NOT release it), so the
-            // character keeps walking in the last direction like it does on PC.
-            return
-        }
-        if (!antiIdleForcing) {
-            antiIdleForcing = true
-            PylaLog.p(TAG, "anti-idle: no significant movement for ${idleWanderDelaySec}s in match, forcing wander")
-            BotStatus.action("Anti-idle: forcing movement")
-        }
-        val playerBox = data["player"]?.firstOrNull()
-        doMovement(clampMovement(generateWanderMovement(playerBox, data["wall"] ?: emptyList(), currentTime)))
-    }
-
-    /**
-     * Anti-idle for the "in match but player not detected" case (respawn or a detection
-     * dropout). The PC bot just releases the keys here, which on Android lifts the virtual
-     * joystick and leaves the character standing still until the game kicks it for
-     * inactivity. Instead, after the usual grace period, keep wandering blind; the
-     * proceed logic keeps running and exits once the match is really over.
-     */
-    private fun applyBlindAntiIdle(currentTime: Double) {
-        if (currentTime - idleSince < idleWanderDelaySec) {
-            if (currentTime - timeSincePlayerLastFound > 1.0) {
+        val decision = planContinuousMovement(brawler, data, frame, capturedAtMs)
+        // Playstyles retain special abilities; the engine owns movement and basic attacks.
+        runPlaystyle(brawler, data, decision.vector)
+        synchronized(this) {
+            if (frameGeneration != combatGeneration || closed || issuingThread.isInterrupted || !inputAllowed() || !gameplayFrameCurrent()) {
+                resetCombat()
+                gameplayEvidence.reset()
                 windowController.releaseMovement()
+                BotStatus.publish(RuntimeState.UNKNOWN, VerificationPhase.VERIFY_STATE, false)
+                maybeReportObservedState("unknown", monotonicNowMs(), onStateChange)
+                return
             }
-            return
+            applyContinuousMovement(decision, issuingThread)
+            // A bounded heartbeat fills slow-capture gaps, but cannot outlive fresh gameplay evidence.
+            startAttackPulse(brawler, issuingThread)
         }
-        if (!antiIdleForcing) {
-            antiIdleForcing = true
-            PylaLog.p(TAG, "anti-idle: player not visible for ${idleWanderDelaySec}s in match, wandering blind")
-            BotStatus.action("Anti-idle: wandering (player not visible)")
-        }
-        doMovement(clampMovement(generateWanderMovement(null, emptyList(), currentTime)))
     }
 
-    private var antiIdleForcing = false
-    private var blindProceedAttempts = 0
+    /** Rate-limited hand-off of the actually observed screen to the engine. */
+    private fun maybeReportObservedState(
+        observed: String?,
+        nowMs: Long,
+        onStateChange: (String) -> Unit,
+    ) {
+        if (observed == null) return
+        // Every observation carries a different capture authority. Suppressing repeated Match or
+        // Unknown callbacks can leave the engine at a stale menu result or hide fresh player loss.
+        lastStateReportMs = nowMs
+        lastReportedState = observed
+        onStateChange(observed)
+    }
+
+    private var lastReportedState: String? = null
+    private var lastStateReportMs: Long = 0L
+
+    @Volatile private var activeGameplayFrameMs: Long = 0L
+    @Volatile private var activeGameplayTarget: Boolean = false
+    @Volatile private var basicAttackEligible: Boolean = false
+    private fun combatTargetCurrent(): Boolean = !closed && !Thread.currentThread().isInterrupted &&
+        inputAllowed() && activeGameplayTarget && gameplayFrameCurrent()
+    private fun gameplayFrameCurrent(): Boolean {
+        val now = monotonicNowMs()
+        return activeGameplayFrameMs > 0L && activeGameplayFrameMs <= now &&
+            now - activeGameplayFrameMs <= MAX_EVIDENCE_FRAME_AGE_MS
+    }
+
+    // ---------- engine-owned basic attack ----------
+    //
+    // There is exactly ONE owner of the attack button: this class. A `.pyla` playstyle's `attack()`
+    // is a no-op, preventing duplicate DOWNs and conflicting charge timers.
+    //
+    // [combatGeneration] is a volatile authority token. Every dispatched attack command captures the
+    // generation current at issue time; a guard sampled later (possibly on a different thread) fails
+    // closed as soon as the generation moved, so target loss / pause / stop cannot revive a queued
+    // old DOWN. It advances on every [resetCombat] and [revokeCombat] even when nothing is held.
+
+    @Volatile
+    private var closed: Boolean = false
+
+    @Volatile
+    private var combatGeneration: Long = 0L
+
+    /** True between a dispatched attack DOWN and its matching UP. Mirrors the policy's own state. */
+    @Volatile
+    private var attackButtonDown: Boolean = false
+    @Volatile private var attackHeldSinceSec: Double = 0.0
+
+    /** Engine-owned repeated basic attack. Pure state machine, no ambient clock. */
+    private val attackPolicy = RepeatedAttackPolicy(MAX_EVIDENCE_FRAME_AGE_MS, requireNewCapture = false)
 
     /**
-     * When the screen still looks like "match" but no player has been visible for a long
-     * time, the game is really showing an unrecognized reward / claim / dialog screen
-     * (e.g. a skin reward splash after a star drop). The PC bot only presses "proceed"
-     * here, which leaves the bot stuck forever on screens whose dismissal button sits
-     * elsewhere. Rotate through the known dismissal buttons instead, so every such screen
-     * eventually gets closed and the bot can never get stuck on a menu or reward.
+     * Terminal stop: no further attack input may ever be produced and anything held is released.
+     * Idempotent.
      */
-    private fun pressDismissalButton(attempt: Int) {
-        val key = DISMISSAL_KEYS[(attempt - 1) % DISMISSAL_KEYS.size]
-        BotStatus.action("Dismissing unrecognized screen via '$key'")
-        windowController.press(key)
+    @Synchronized fun revokeCombat() {
+        closed = true
+        resetCombat()
     }
 
-    private fun generateWanderMovement(
-        playerBox: FloatArray?,
-        walls: List<FloatArray>,
-        currentTime: Double
-    ): Pair<Double, Double> {
-        val r = PylaUtils.JOYSTICK_RADIUS.toDouble()
+    /**
+     * Reversible observation denial (player lost, menu screen, stale frame, pause). Releases held
+     * input and revokes queued commands by advancing the authority generation, but keeps the object
+     * usable for the next admitted frame.
+     */
+    @Synchronized fun resetCombat() {
+        basicAttackEligible = false
+        activeGameplayFrameMs = 0L
+        activeGameplayTarget = false
+        combatGeneration++
+        attackPulse?.let { removeCombatPulse(it) }
+        attackPulse = null
+        continuousPlanner.reset()
+        sceneProgress.reset()
+        releaseAttackInput(reason = "reset")
+        windowController.releaseMovement()
+    }
 
-        if (currentTime - wanderChangeTime > wanderChangeIntervalSec) {
-            wanderAngle = Random.nextDouble(0.0, 2.0 * PI)
-            wanderChangeTime = currentTime
-        }
-
-        val primary = (cos(wanderAngle) * r) to (sin(wanderAngle) * r)
-        if (!isPathBlocked(playerBox, primary, walls)) return primary
-
-        for (step in 1..7) {
-            val offset = step * PI / 4.0
-            for (sign in listOf(1.0, -1.0)) {
-                val angle = wanderAngle + offset * sign
-                val candidate = (cos(angle) * r) to (sin(angle) * r)
-                if (!isPathBlocked(playerBox, candidate, walls)) {
-                    wanderAngle = angle
-                    wanderChangeTime = currentTime
-                    return candidate
+    /** One outstanding task; no catch-up burst and no new thread for each frame. */
+    @Synchronized private fun startAttackPulse(brawler: String, issuingThread: Thread) {
+        if (pulseBrawler != brawler && attackButtonDown) releaseAttackInput("brawler_changed")
+        pulseBrawler = brawler
+        if (attackPulse != null) return
+        val generation = combatGeneration
+        lateinit var task: Runnable
+        task = Runnable {
+            synchronized(this) {
+                if (attackPulse !== task || generation != combatGeneration) return@synchronized
+                try {
+                    if (!attackCommandGuard(generation, activeGameplayFrameMs, false, issuingThread)()) {
+                        resetCombat()
+                        return@synchronized
+                    }
+                    stepEngineBasicAttack(pulseBrawler, issuingThread)
+                    if (attackPulse === task) postCombatPulse(task, 100L)
+                } catch (e: Exception) {
+                    resetCombat()
+                    DiagnosticLog.event("combat.pulse_failed", "type=${e.javaClass.simpleName}")
                 }
             }
         }
+        attackPulse = task
+        task.run()
+    }
 
-        val d = r * 0.7071
-        val allMoves = mutableListOf(
-            0.0 to -r, d to -d, r to 0.0, d to d,
-            0.0 to r, -d to d, -r to 0.0, -d to -d
-        )
-        allMoves.shuffle(Random)
-        for (move in allMoves) {
-            if (!isPathBlocked(playerBox, move, walls)) return move
+    /**
+     * Guard for an already-dispatched attack command, re-evaluated at native dispatch time.
+     *
+     * It never trusts the immutable evidence captured when the command was issued alone: authority,
+     * closed state and the *live* eligibility of the current frame are all re-checked here, and a
+     * finite TAP additionally pins the capture timestamp it was issued from so newer frames cannot
+     * rejuvenate a stale queued tap. A held charge is guarded by live eligibility plus the original
+     * generation, which is what lets an ordinary run of fresh consecutive frames keep the charge
+     * alive.
+     */
+    private fun attackCommandGuard(
+        generation: Long,
+        capturedAtMs: Long,
+        finite: Boolean,
+        thread: Thread,
+    ): () -> Boolean = guard@{
+        if (closed) false
+        // The guard may be sampled on the input thread, where Thread.currentThread() is not the
+        // engine thread; check the issuing thread's own interrupt flag instead.
+        else if (thread.isInterrupted) false
+        else if (combatGeneration != generation) false
+        else if (gameplayGeometry != InputCoordinates.geometryGeneration) false
+        else if (!inputAllowed()) false
+        else if (!basicAttackEligible || !gameplayFrameCurrent()) false
+        else if (finite && (capturedAtMs <= 0L || capturedAtMs > monotonicNowMs() ||
+            monotonicNowMs() - capturedAtMs > MAX_EVIDENCE_FRAME_AGE_MS)) false
+        else true
+    }
+
+    /**
+     * Release a held attack button exactly once. Releases are deliberately unguarded - a DOWN that
+     * was legitimately dispatched must always be matched by its UP, otherwise the button stays
+     * stuck down.
+     */
+    private fun releaseAttackInput(reason: String) {
+        if (!attackButtonDown) {
+            attackButtonDown = false
+            return
+        }
+        attackButtonDown = false
+        attackHeldSinceSec = 0.0
+        windowController.press("attack", touchUp = true, touchDown = false)
+        // Drops any in-flight charge; the cadence clock is deliberately NOT reset, so an immediate
+        // re-acquisition cannot hand out a free burst.
+        attackPolicy.revoke()
+        DiagnosticLog.event("combat.attack_release", "reason=$reason")
+    }
+
+    /** Basic auto attack needs admitted gameplay, not an enemy/range/line-of-sight observation. */
+    @Synchronized private fun stepEngineBasicAttack(brawler: String, issuingThread: Thread) {
+        if (closed || issuingThread.isInterrupted || !inputAllowed() || !basicAttackEligible || !gameplayFrameCurrent()) {
+            resetCombat()
+            return
         }
 
-        return primary
+        // Charge duration comes from the real catalog only; an unknown brawler degrades to a tap.
+        val holdSeconds = brawlersInfo[brawler]?.holdAttack ?: 0.0
+        val nowMs = monotonicNowMs()
+        val decision = attackPolicy.step(
+            nowMs = nowMs,
+            frameCapturedAtMs = activeGameplayFrameMs,
+            targetPresent = basicAttackEligible,
+            holdSeconds = holdSeconds,
+        )
+        val generation = combatGeneration
+        when (decision.action) {
+            BasicAttackAction.NONE -> {
+                DiagnosticLog.sample(
+                    "combat.attack_idle",
+                    "denial=${decision.denial.name} mode=continuous",
+                )
+            }
+            BasicAttackAction.TAP -> {
+                windowController.press(
+                    "attack",
+                    touchUp = true,
+                    touchDown = true,
+                    guard = attackCommandGuard(generation, activeGameplayFrameMs, finite = true, thread = issuingThread),
+                )
+                DiagnosticLog.sample("combat.attack_tap", "mode=continuous")
+            }
+            BasicAttackAction.HOLD -> {
+                attackHeldSinceSec = nowSec()
+                attackButtonDown = true
+                windowController.press(
+                    "attack",
+                    touchUp = false,
+                    touchDown = true,
+                    guard = attackCommandGuard(generation, activeGameplayFrameMs, finite = false, thread = issuingThread),
+                )
+                DiagnosticLog.event("combat.attack_hold", "hold=${holdSeconds}s mode=continuous")
+            }
+            BasicAttackAction.RELEASE -> {
+                releaseAttackInput(reason = decision.denial.name)
+            }
+        }
+    }
+
+    private fun isMenuScreen(state: String?): Boolean =
+        state != null && state != "unknown" && state != "match"
+
+    /**
+     * Deterministic movement decision from the current frame only: the fresh player position, the
+     * currently detected enemies/teammates and the currently detected walls.
+     */
+    private fun planContinuousMovement(
+        brawler: String,
+        data: Map<String, MutableList<FloatArray>>,
+        frame: Mat,
+        capturedAtMs: Long,
+    ): ContinuousMovementDecision {
+        val playerBox = data["player"]?.firstOrNull()
+        val player = playerBox?.let { getPlayerHitCircle(it) }?.first
+        val enemies = positions(data["enemy"], playerBox)
+        val allies = positions(data["teammate"], playerBox)
+        val walls = data["wall"] ?: emptyList()
+        val (_, attackRange, _) = getBrawlerRange(brawler)
+        val range = if (attackRange > 0) attackRange.toDouble() else tileSizePx
+        val (_, radius) = getPlayerHitCircle(playerBox)
+        val samples = ArrayList<Int>(30)
+        // World-only grid: no lower controls, top HUD or centre player/health-bar region.
+        for (y in listOf(0.20, 0.30, 0.40, 0.50, 0.60)) {
+            for (x in listOf(0.10, 0.20, 0.30, 0.70, 0.80, 0.90)) {
+                val pixel = frame.get((frame.rows() * y).toInt(), (frame.cols() * x).toInt())
+                if (pixel != null && pixel.size >= 3) samples.add(((pixel[0] + pixel[1] + pixel[2]) / 3).toInt().coerceIn(0, 255))
+            }
+        }
+        val now = monotonicNowMs()
+        val progress = sceneProgress.observe(samples.toIntArray(), capturedAtMs, now)
+        return continuousPlanner.plan(
+            player = player,
+            enemies = enemies,
+            allies = allies,
+            attackRange = range,
+            playerRadius = radius,
+            stepPx = tileSizePx,
+            capturedAtMs = capturedAtMs,
+            nowMs = now,
+            progressObserved = progress,
+            wallProbe = { from, to, r -> wallsBlockSweptCircle(from, to, r, walls) },
+        )
+    }
+
+    private fun positions(boxes: List<FloatArray>?, playerBox: FloatArray?): List<Pair<Double, Double>> {
+        if (boxes.isNullOrEmpty()) return emptyList()
+        val fw = frame?.cols() ?: 0
+        val fh = frame?.rows() ?: 0
+        return boxes
+            .filter { GameplayEvidenceGate.validPlayerBox(it, fw, fh) }
+            .map { getEntityPos(it) }
+            .distinct()
+    }
+
+    private fun applyContinuousMovement(decision: ContinuousMovementDecision, issuingThread: Thread) {
+        val runtimeState = RuntimeState.MATCH // This path is reachable only after positive current-frame gameplay admission.
+        val phase = when (decision.mode) {
+            ContinuousMovementMode.DENIED -> VerificationPhase.VERIFY_STATE
+            ContinuousMovementMode.ROAM -> VerificationPhase.ROAM
+            ContinuousMovementMode.APPROACH -> VerificationPhase.APPROACH
+            ContinuousMovementMode.RETREAT -> VerificationPhase.RETREAT
+            ContinuousMovementMode.FOLLOW -> VerificationPhase.FOLLOW
+            ContinuousMovementMode.STRAFE -> VerificationPhase.STRAFE
+            ContinuousMovementMode.ESCAPE -> VerificationPhase.ESCAPE
+            ContinuousMovementMode.DETOUR -> VerificationPhase.AVOID
+        }
+        BotStatus.publish(runtimeState, phase, verified = decision.vector != null)
+        DiagnosticLog.sample("movement.continuous", "mode=${decision.mode.name}")
+        val vector = decision.vector
+        if (vector == null) {
+            doMovement(null)
+            return
+        }
+        val movement = clampMovement(vector)
+        windowController.moveGuarded(movement.first.toFloat(), movement.second.toFloat(),
+            attackCommandGuard(combatGeneration, activeGameplayFrameMs, finite = false, thread = issuingThread))
+    }
+
+    /**
+     * Playstyle execution behind positive player evidence. Its movement result is recorded for the
+     * script's own `last_movement` context only; production movement input is owned exclusively by
+     * the directed planner, so no stale or random vector can reach the joystick.
+     */
+    private fun runPlaystyle(brawler: String, data: Map<String, MutableList<FloatArray>>, movement: Pair<Double, Double>?) {
+        persistentDataPy.map["time_since_holding_attack"] = if (attackButtonDown) attackHeldSinceSec else PyNone
+        val script = pylaScript ?: return
+        val playerBox = data["player"]?.firstOrNull() ?: return
+        val raw = script.run(buildContext(brawler, playerBox, data, movement))
+        val move = clampMovement(pyToPair(raw) ?: return)
+        if (hypot(move.first, move.second) >= MIN_SIGNIFICANT_MOVEMENT) {
+            lastMovement = move
+            lastMovementChangeTime = nowSec()
+        }
     }
 
     // ---------- .pyla context bridge ----------
@@ -807,7 +1064,7 @@ class Play(
         return Py.toDouble(x) to Py.toDouble(y)
     }
 
-    private fun buildContext(brawler: String, playerBox: FloatArray, data: Map<String, MutableList<FloatArray>>): Map<String, Any> {
+    private fun buildContext(brawler: String, playerBox: FloatArray, data: Map<String, MutableList<FloatArray>>, movement: Pair<Double, Double>?): Map<String, Any> {
         val ctx = HashMap<String, Any>()
 
         ctx["player_data"] = boxToPy(playerBox)
@@ -850,16 +1107,20 @@ class Play(
             val v = a.getOrNull(0)
             when (v) { is PyList -> v.items.isNotEmpty(); is PyTuple -> v.items.isNotEmpty(); else -> false }
         }
-        ctx["attack"] = NativeFn("attack") { a, kw ->
-            val tu = boolArg(kw["touch_up"] ?: a.getOrNull(0), true)
-            val td = boolArg(kw["touch_down"] ?: a.getOrNull(1), true)
-            attack(tu, td); PyNone
+        // Single owner of the basic attack: the engine. A playstyle calling `attack()` (or a script that
+        // errors, or no script at all) must not produce a second, competing DOWN - the engine manages the
+        // hold timer and the repeated cadence itself. This stays a callable no-op so playstyles keep
+        // running unchanged.
+        ctx["attack"] = NativeFn("attack") { _, _ ->
+            if (combatTargetCurrent()) DiagnosticLog.sample("combat.attack_script_noop", "owner=engine")
+            PyNone
         }
-        ctx["use_hypercharge"] = NativeFn("use_hypercharge") { _, _ -> useHypercharge(); PyNone }
-        ctx["use_super"] = NativeFn("use_super") { _, _ -> useSuper(); PyNone }
-        ctx["use_gadget"] = NativeFn("use_gadget") { _, _ -> useGadget(); PyNone }
+        ctx["use_hypercharge"] = NativeFn("use_hypercharge") { _, _ -> if (combatTargetCurrent()) useHypercharge(); PyNone }
+        ctx["use_super"] = NativeFn("use_super") { _, _ -> if (combatTargetCurrent()) useSuper(); PyNone }
+        ctx["use_gadget"] = NativeFn("use_gadget") { _, _ -> if (combatTargetCurrent()) useGadget(); PyNone }
+        // Keep the bridge name, returning this frame's already-planned intent without advancing it.
         ctx["get_random_movement"] = NativeFn("get_random_movement") { _, _ ->
-            PyTuple(listOf(Random.nextInt(-75, 76).toLong(), Random.nextInt(-75, 76).toLong()))
+            movement?.takeIf { gameplayFrameCurrent() }?.let { pairToPy(it) } ?: PyTuple(listOf(0.0, 0.0))
         }
         ctx["must_brawler_hold_attack"] = NativeFn("must_brawler_hold_attack") { a, _ ->
             mustHoldAttack(a.getOrNull(0) as? String ?: brawler)
@@ -915,13 +1176,9 @@ class Play(
     private fun pairAsPy(p: Pair<*, *>): PyTuple =
         PyTuple(listOf((p.first as Number).toDouble(), (p.second as Number).toDouble()))
 
-    private fun boolArg(v: Any?, default: Boolean): Boolean = when (v) {
-        null -> default
-        is Boolean -> v
-        else -> Py.truthy(v)
-    }
-
     fun close() {
+        // Terminal: no attack input may ever be produced after close, and anything held comes up.
+        revokeCombat()
         frame = null
         detectMainInfo.close()
         detectTileDetector?.close()

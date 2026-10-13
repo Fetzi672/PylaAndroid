@@ -47,6 +47,8 @@ class OverlayService : Service() {
     private var running = false
     private var paused = false
     private var actionText = "No active action"
+    private var stateText = "State: Unknown"
+    private var phaseText = "Check: Stopped"
 
     private val tick = object : Runnable {
         override fun run() {
@@ -58,6 +60,10 @@ class OverlayService : Service() {
             actionText = com.pyla.ai.engine.BotStatus.lastAction.ifBlank {
                 com.pyla.ai.engine.BotStatus.currentState.ifBlank { "No active action" }
             }
+            val verification = if (running) com.pyla.ai.engine.BotStatus.verification
+                else com.pyla.ai.engine.RuntimeVerification()
+            stateText = verification.stateLine
+            phaseText = verification.phaseLine
             view?.invalidate()
             if (view != null) handler.postDelayed(this, 500)
         }
@@ -84,7 +90,7 @@ class OverlayService : Service() {
         density = resources.displayMetrics.density
         panelWidth = (224 * density).roundToInt()
         headerHeight = (52 * density).roundToInt()
-        expandedHeight = (160 * density).roundToInt()
+        expandedHeight = (190 * density).roundToInt()
         windowManager = getSystemService(WINDOW_SERVICE) as WindowManager
         try {
             install()
@@ -183,7 +189,7 @@ class OverlayService : Service() {
         private var moved = false
 
         private fun buttonRects(): List<RectF> {
-            val btnY = headerHeight + 34f * density
+            val btnY = headerHeight + 64f * density
             val btnH = 46f * density
             val gap = 8f * density
             val bw = (panelWidth - 2 * pad - gap * 2) / 3
@@ -238,9 +244,19 @@ class OverlayService : Service() {
             div.color = Color.argb((40 * anim).roundToInt(), 132, 139, 153)
             canvas.drawRect(pad, headerHeight.toFloat(), w - pad, headerHeight.toFloat() + density, div)
 
-            actionP.color = Color.argb((180 * anim).roundToInt(), 182, 188, 200)
-            val at = if (actionText.length > 28) actionText.take(27) + "…" else actionText
-            canvas.drawText(at, pad, headerHeight + 22f * density, actionP)
+            actionP.color = Color.argb((220 * anim).roundToInt(), 232, 236, 244)
+            fun fitted(text: String): String {
+                val available = w - pad * 2
+                if (actionP.measureText(text) <= available) return text
+                var end = text.length
+                while (end > 0 && actionP.measureText(text.take(end) + "…") > available) end--
+                return text.take(end) + "…"
+            }
+            canvas.drawText(fitted(stateText), pad, headerHeight + 20f * density, actionP)
+            actionP.color = Color.argb((200 * anim).roundToInt(), 182, 188, 200)
+            canvas.drawText(fitted(phaseText), pad, headerHeight + 36f * density, actionP)
+            actionP.color = Color.argb((160 * anim).roundToInt(), 182, 188, 200)
+            canvas.drawText(fitted(actionText), pad, headerHeight + 52f * density, actionP)
 
             val rects = buttonRects()
             drawBtn(canvas, rects[0], "Start", GREEN, !running, OverlayIcon.PLAY, a)

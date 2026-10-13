@@ -7,6 +7,7 @@ import android.os.Handler
 import android.os.Looper
 import android.view.accessibility.AccessibilityEvent
 import com.pyla.ai.capture.InputCoordinates
+import com.pyla.ai.diagnostics.DiagnosticLog
 import com.pyla.ai.engine.BotStatus
 import com.pyla.ai.engine.PylaLog
 
@@ -14,7 +15,26 @@ class InputService : AccessibilityService() {
 
     private val handler = Handler(Looper.getMainLooper())
 
+    /** One optional request authority. Once denied, retries cannot revive it. */
+    private class Authority(private val guard: () -> Boolean) {
+        private var denied = false
+        fun allows(op: String = "dispatchGate"): Boolean {
+            if (!denied) {
+                denied = try { !guard() } catch (_: Throwable) { true }
+                if (denied) DiagnosticLog.event("input.gesture.denied", "op=$op reason=authority")
+            }
+            return !denied
+        }
+    }
+
     private class Channel(val name: String) {
+        var authority: Authority? = null
+        fun snapshot() = Snapshot(lastStroke, curX, curY, isDown, wantDown)
+        fun restore(s: Snapshot) {
+            lastStroke = s.stroke; curX = s.x; curY = s.y; isDown = s.down; wantDown = s.wanted
+        }
+        data class Snapshot(val stroke: GestureDescription.StrokeDescription?, val x: Float,
+            val y: Float, val down: Boolean, val wanted: Boolean)
         var lastStroke: GestureDescription.StrokeDescription? = null
         var curX = 0f; var curY = 0f
         var downX = 0f; var downY = 0f
@@ -32,11 +52,12 @@ class InputService : AccessibilityService() {
 
     private val joystickCh = Channel("joystick")
     private val attackCh = Channel("attack")
-    private class Pending(val x1: Float, val y1: Float, val x2: Float, val y2: Float, val durationMs: Long)
+    private class Pending(val x1: Float, val y1: Float, val x2: Float, val y2: Float, val durationMs: Long, val authority: Authority? = null, val replayable: Boolean = true)
     private val strokeQueue = ArrayDeque<Pending>()
     private var gestureInFlight = false
     private var pressSeq = 0
     private var lastQueueWarningMs = 0L
+    private var diagnosticDispatchSeq = 0L
 
     override fun onServiceConnected() {
         instance = this
@@ -89,16 +110,19 @@ class InputService : AccessibilityService() {
 
     fun tapAt(x: Float, y: Float, holdMs: Long = 40) {
         handler.post {
-            enqueueStroke(Pending(x, y, x, y, holdMs.coerceIn(1, 10_000)))
-            pump()
+            enqueueAndPump(Pending(x, y, x, y, holdMs.coerceIn(1, 10_000)))
         }
     }
 
     fun swipeAt(x1: Float, y1: Float, x2: Float, y2: Float, durationMs: Long = 500) {
         handler.post {
-            enqueueStroke(Pending(x1, y1, x2, y2, durationMs.coerceIn(1, 10_000)))
-            pump()
+            enqueueAndPump(Pending(x1, y1, x2, y2, durationMs.coerceIn(1, 10_000)))
         }
+    }
+
+    private fun enqueueAndPump(pending: Pending) {
+        enqueueStroke(pending)
+        pump()
     }
 
     private fun enqueueStroke(pending: Pending) {
@@ -116,14 +140,33 @@ class InputService : AccessibilityService() {
 
     private fun restorePending(items: List<Pending>) {
         for (item in items.asReversed()) {
+            // Navigation consumes its request even on failure: only a fresh gate ticket may retry.
+            if (!item.replayable) continue
+            if (item.authority != null) {
+                if (!item.authority.allows()) continue
+                // Keep at most one waiting basic attack, including after cancellation/rejection.
+                if (strokeQueue.any { it.authority != null && it.replayable }) continue
+            }
             if (strokeQueue.size >= MAX_QUEUED_STROKES) strokeQueue.removeLast()
             strokeQueue.addFirst(item)
         }
     }
 
-    fun joystickMove(dx: Float, dy: Float) {
+    fun joystickMove(dx: Float, dy: Float) = queueJoystickMove(dx, dy, null)
+
+    fun joystickMoveGuarded(dx: Float, dy: Float, guard: () -> Boolean) =
+        queueJoystickMove(dx, dy, Authority(guard))
+
+    private fun queueJoystickMove(dx: Float, dy: Float, authority: Authority?) {
+        val admitted = dx.isFinite() && dy.isFinite() && authority?.allows("joystickMove") != false
         val (cx, cy) = InputCoordinates.joystick()
         handler.post {
+            joystickCh.authority = authority
+            if (!admitted || authority?.allows() == false) {
+                joystickCh.wantDown = false
+                pump()
+                return@post
+            }
             if (!joystickCh.wantDown) { joystickCh.downX = cx; joystickCh.downY = cy }
             joystickCh.wantDown = true
             joystickCh.targetX = cx + dx
@@ -143,9 +186,18 @@ class InputService : AccessibilityService() {
         holdAttackAt(x.toFloat(), y.toFloat())
     }
 
-    fun holdAttackAt(x: Float, y: Float) {
+    @JvmOverloads
+    fun holdAttackAt(x: Float, y: Float, guard: (() -> Boolean)? = null) {
+        val authority = guard?.let { Authority(it) }
+        val admitted = authority?.allows("holdAttackAt") != false
         handler.post {
             pressSeq++
+            attackCh.authority = authority
+            if (!admitted || authority?.allows() == false) {
+                attackCh.wantDown = false
+                pump() // If the old contact was held, its UP remains required.
+                return@post
+            }
             if (!attackCh.wantDown) { attackCh.downX = x; attackCh.downY = y }
             attackCh.wantDown = true
             attackCh.targetX = x
@@ -154,14 +206,32 @@ class InputService : AccessibilityService() {
         }
     }
 
-    fun pressAndRelease(x: Float, y: Float, holdMs: Long) {
+    @JvmOverloads
+    fun pressAndRelease(x: Float, y: Float, holdMs: Long, guard: (() -> Boolean)? = null) {
+        val authority = guard?.let { Authority(it) }
+        if (authority?.allows() == false) return
         handler.post {
+            if (authority?.allows() == false) return@post
+            if (authority != null) {
+                // Freshest request replaces a waiting guarded tap, never an unguarded UI action.
+                if (strokeQueue.removeAll { it.authority != null && it.replayable })
+                    DiagnosticLog.sample("input.gesture.coalesced", "op=basic_attack")
+            }
             // Normal combat presses are discrete PC-style taps. Keeping them on the
             // continuous attack channel caused repeated attack() calls to cancel each
             // other's release and turn into one long hold, which is not equivalent to
             // the PC click/touch_down/touch_up sequence.
-            enqueueStroke(Pending(x, y, x, y, holdMs.coerceIn(1, 10_000)))
-            pump()
+            enqueueAndPump(Pending(x, y, x, y, holdMs.coerceIn(1, 10_000), authority))
+        }
+    }
+
+    /** One navigation request, at most one dispatch attempt; never restored by combat recovery. */
+    fun navigationTapOnce(x: Float, y: Float, holdMs: Long, guard: () -> Boolean) {
+        val authority = Authority(guard)
+        if (!authority.allows()) return
+        handler.post {
+            if (!authority.allows()) return@post
+            enqueueAndPump(Pending(x, y, x, y, holdMs.coerceIn(1, 10_000), authority, replayable = false))
         }
     }
 
@@ -177,48 +247,82 @@ class InputService : AccessibilityService() {
     private fun pump() {
         if (gestureInFlight) return
         val channels = listOf(joystickCh, attackCh)
-        val anyChannelUpdate = channels.any { it.needsUpdate() }
-        if (!anyChannelUpdate && strokeQueue.isEmpty()) return
-
-        val builder = GestureDescription.Builder()
-        var strokeCount = 0
-        val queuedForGesture = ArrayList<Pending>()
-
-        for (ch in channels) {
-            val stroke = strokeFor(ch) ?: continue
-            builder.addStroke(stroke)
-            strokeCount++
-        }
-
-        while (strokeQueue.isNotEmpty() && strokeCount < MAX_STROKES_PER_GESTURE) {
-            val p = strokeQueue.removeFirst()
-            queuedForGesture.add(p)
-            val path = Path().apply { moveTo(sx(p.x1), sy(p.y1)); lineTo(sx(p.x2), sy(p.y2)) }
-            builder.addStroke(GestureDescription.StrokeDescription(path, 0L, p.durationMs, false))
-            strokeCount++
-        }
-
-        if (strokeCount == 0) return
-
-        val gesture = try { builder.build() } catch (t: Throwable) {
-            PylaLog.w(TAG, "gesture build failed: ${t.message}")
-            channels.forEach { it.reset() }
-            restorePending(queuedForGesture)
-            handler.postDelayed({ pump() }, DISPATCH_RETRY_MS)
-            return
-        }
-
+        // At most one held attack and one waiting guarded tap can lose authority. Each denial is
+        // sticky; three passes suffice to rebuild without either, retaining unguarded work and UP.
+        for (attempt in 0..2) {
+            channels.forEach { if (it.wantDown && it.authority?.allows() == false) it.wantDown = false }
+            if (!channels.any { it.needsUpdate() } && strokeQueue.isEmpty()) return
+            val before = channels.map { it.snapshot() }
+            // A gesture that continues an already-open pointer must not introduce a new pointer in
+            // its first step: AOSP MotionEventInjector.prepareToContinueOldGesture counts every
+            // first-step point (a fresh DOWN included) and subtracts only the old open strokes, so a
+            // new tap sharing the continuation's start time makes it return false and the dispatch is
+            // cancelled. Offset every new stroke when a continuation is present.
+            // See InputGestureComposition.
+            val willContinue = channels.any { it.isDown && it.lastStroke != null }
+            val willEmitNew = channels.any { it.wantDown && !it.isDown } || strokeQueue.isNotEmpty()
+            val mixed = willContinue && willEmitNew
+            val builder = GestureDescription.Builder()
+            var strokeCount = 0
+            val queuedForGesture = ArrayList<Pending>()
+            // AOSP appends a new pointer after all open pointers but uses its gesture-step
+            // index for ACTION_POINTER_DOWN. Keep continued channels first, even when attack
+            // was held before the joystick, so that action index addresses the new pointer.
+            for (ch in channels.sortedBy { if (it.isDown && it.lastStroke != null) 0 else 1 }) {
+                val stroke = strokeFor(ch, mixed) ?: continue
+                builder.addStroke(stroke); strokeCount++
+            }
+            while (strokeQueue.isNotEmpty() && strokeCount < MAX_STROKES_PER_GESTURE) {
+                val p = strokeQueue.removeFirst()
+                if (p.authority?.allows("pendingStroke") == false) continue
+                queuedForGesture.add(p)
+                val path = Path().apply { moveTo(sx(p.x1), sy(p.y1)); lineTo(sx(p.x2), sy(p.y2)) }
+                val startTimeMs = InputGestureComposition.startTimeFor(isContinuation = false, mixed = mixed)
+                val durationMs = InputGestureComposition.durationFor(p.durationMs, isContinuation = false, mixed = mixed)
+                builder.addStroke(GestureDescription.StrokeDescription(path, startTimeMs, durationMs, false))
+                strokeCount++
+            }
+            if (strokeCount == 0) return
+            val gesture = try { builder.build() } catch (t: Throwable) {
+                PylaLog.w(TAG, "gesture build failed: ${t.message}")
+                channels.forEach { it.reset() }
+                restorePending(queuedForGesture)
+                handler.postDelayed({ pump() }, DISPATCH_RETRY_MS)
+                return
+            }
+            val deniedChannels = channels.mapIndexed { i, ch -> before[i].wanted && ch.authority?.allows() == false }
+            val deniedTap = queuedForGesture.any { it.authority?.allows() == false }
+            if (deniedChannels.any { it } || deniedTap) {
+                // Nothing was sent. Undo ALL speculative channel mutations, not just the denied
+                // channel: otherwise an unaffected joystick could continue an unsent predecessor.
+                channels.forEachIndexed { i, ch ->
+                    ch.restore(before[i])
+                    if (deniedChannels[i]) ch.wantDown = false
+                }
+                restorePending(queuedForGesture)
+                continue
+            }
         gestureInFlight = true
+        val diagnosticDispatchId = ++diagnosticDispatchSeq
         val accepted = try {
             dispatchGesture(gesture, object : GestureResultCallback() {
                 override fun onCompleted(g: GestureDescription?) {
+                    DiagnosticLog.sample("input.gesture.completed", "dispatch=$diagnosticDispatchId strokes=$strokeCount (Android callback; not game-effect proof)")
                     gestureInFlight = false
                     pump()
                 }
 
                 override fun onCancelled(g: GestureDescription?) {
-                    joystickCh.reset()
-                    attackCh.reset()
+                    DiagnosticLog.event("input.gesture.cancelled", "dispatch=$diagnosticDispatchId strokes=$strokeCount restored=${queuedForGesture.size}")
+                    // Android has already lifted every pointer of the cancelled gesture. Drop the
+                    // established chains so the next dispatch presses fresh, but preserve each logical
+                    // want: WindowController suppresses an unchanged movement target, so a dropped
+                    // joystick want would stop movement permanently. See InputCancellationRecovery.
+                    for (ch in listOf(joystickCh, attackCh)) {
+                        val recovered = InputCancellationRecovery.afterCancel(ch.wantDown)
+                        ch.reset()
+                        ch.wantDown = recovered.wantDown
+                    }
                     restorePending(queuedForGesture)
                     gestureInFlight = false
                     handler.postDelayed({ pump() }, DISPATCH_RETRY_MS)
@@ -228,24 +332,32 @@ class InputService : AccessibilityService() {
             PylaLog.w(TAG, "dispatch failed: ${t.message}")
             false
         }
+        DiagnosticLog.sample("input.gesture.dispatch", "dispatch=$diagnosticDispatchId accepted=$accepted strokes=$strokeCount (API acknowledgement only)")
         if (!accepted) {
+            DiagnosticLog.event("input.gesture.rejected", "dispatch=$diagnosticDispatchId strokes=$strokeCount restored=${queuedForGesture.size}")
             gestureInFlight = false
             joystickCh.reset()
             attackCh.reset()
             restorePending(queuedForGesture)
             handler.postDelayed({ pump() }, DISPATCH_RETRY_MS)
         }
+            return
+        }
+        handler.postDelayed({ pump() }, DISPATCH_RETRY_MS)
     }
 
     private fun sx(v: Float): Float = InputCoordinates.toScreenX(v)
     private fun sy(v: Float): Float = InputCoordinates.toScreenY(v)
 
-    private fun strokeFor(ch: Channel): GestureDescription.StrokeDescription? {
+    private fun strokeFor(ch: Channel, mixed: Boolean): GestureDescription.StrokeDescription? {
         val prev = ch.lastStroke
         return when {
             ch.wantDown && !ch.isDown -> {
                 val path = transitionPath(ch.downX, ch.downY, ch.targetX, ch.targetY)
-                val s = GestureDescription.StrokeDescription(path, 0L, MOVE_DURATION_MS, true)
+                // New pointer in this gesture: offset it when the gesture also continues an open one.
+                val startTimeMs = InputGestureComposition.startTimeFor(isContinuation = false, mixed = mixed)
+                val durationMs = InputGestureComposition.durationFor(MOVE_DURATION_MS, isContinuation = false, mixed = mixed)
+                val s = GestureDescription.StrokeDescription(path, startTimeMs, durationMs, true)
                 ch.isDown = true
                 ch.curX = ch.targetX; ch.curY = ch.targetY
                 ch.lastStroke = s

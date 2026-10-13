@@ -216,7 +216,7 @@ class MainActivity : ComponentActivity() {
 
     private fun stopBot() {
         BotEngine.instance?.stop()
-        CaptureService.stop(this)
+        stopService(Intent(this, CaptureService::class.java))
     }
 
     companion object { const val ACTION_REQUEST_START = "com.pyla.ai.overlay.REQUEST_START" }
