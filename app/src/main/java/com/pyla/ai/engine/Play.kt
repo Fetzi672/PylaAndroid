@@ -975,7 +975,7 @@ class Play(
         persistentDataPy.map["time_since_holding_attack"] = if (attackButtonDown) attackHeldSinceSec else PyNone
         val script = pylaScript ?: return
         val playerBox = data["player"]?.firstOrNull() ?: return
-        val raw = script.run(buildContext(brawler, playerBox, data, movement))
+        val raw = script.run(buildContext(ContextParams(brawler, playerBox, data, movement)))
         val move = clampMovement(pyToPair(raw) ?: return)
         if (hypot(move.first, move.second) >= MIN_SIGNIFICANT_MOVEMENT) {
             lastMovement = move
@@ -1064,15 +1064,22 @@ class Play(
         return Py.toDouble(x) to Py.toDouble(y)
     }
 
-    private fun buildContext(brawler: String, playerBox: FloatArray, data: Map<String, MutableList<FloatArray>>, movement: Pair<Double, Double>?): Map<String, Any> {
+    private data class ContextParams(
+        val brawler: String,
+        val playerBox: FloatArray,
+        val data: Map<String, MutableList<FloatArray>>,
+        val movement: Pair<Double, Double>?
+    )
+
+    private fun buildContext(params: ContextParams): Map<String, Any> {
         val ctx = HashMap<String, Any>()
 
-        ctx["player_data"] = boxToPy(playerBox)
-        ctx["enemy_data"] = boxesToPy(data["enemy"] ?: emptyList())
-        ctx["teammate_data"] = boxesToPy(data["teammate"] ?: emptyList())
-        ctx["walls"] = boxesToPy(data["wall"] ?: emptyList())
-        ctx["bushes"] = boxesToPy(data["bush"] ?: emptyList())
-        ctx["brawler"] = brawler
+        ctx["player_data"] = boxToPy(params.playerBox)
+        ctx["enemy_data"] = boxesToPy(params.data["enemy"] ?: emptyList())
+        ctx["teammate_data"] = boxesToPy(params.data["teammate"] ?: emptyList())
+        ctx["walls"] = boxesToPy(params.data["wall"] ?: emptyList())
+        ctx["bushes"] = boxesToPy(params.data["bush"] ?: emptyList())
+        ctx["brawler"] = params.brawler
         ctx["current_brawler"] = currentBrawler ?: PyNone
         ctx["brawlers_info"] = brawlersInfoPy()
         ctx["is_gadget_ready"] = isGadgetReady
@@ -1100,7 +1107,7 @@ class Play(
             getActualPlayerBox(pyToBox(a[0]))?.let { boxToPy(it) } ?: PyNone
         }
         ctx["get_brawler_range"] = NativeFn("get_brawler_range") { a, _ ->
-            val (s, at, su) = getBrawlerRange(a[0] as? String ?: brawler)
+            val (s, at, su) = getBrawlerRange(a[0] as? String ?: params.brawler)
             PyList(mutableListOf(s.toLong(), at.toLong(), su.toLong()))
         }
         ctx["is_there_enemy"] = NativeFn("is_there_enemy") { a, _ ->
@@ -1120,10 +1127,10 @@ class Play(
         ctx["use_gadget"] = NativeFn("use_gadget") { _, _ -> if (combatTargetCurrent()) useGadget(); PyNone }
         // Keep the bridge name, returning this frame's already-planned intent without advancing it.
         ctx["get_random_movement"] = NativeFn("get_random_movement") { _, _ ->
-            movement?.takeIf { gameplayFrameCurrent() }?.let { pairToPy(it) } ?: PyTuple(listOf(0.0, 0.0))
+            params.movement?.takeIf { gameplayFrameCurrent() }?.let { pairToPy(it) } ?: PyTuple(listOf(0.0, 0.0))
         }
         ctx["must_brawler_hold_attack"] = NativeFn("must_brawler_hold_attack") { a, _ ->
-            mustHoldAttack(a.getOrNull(0) as? String ?: brawler)
+            mustHoldAttack(a.getOrNull(0) as? String ?: params.brawler)
         }
         ctx["find_closest_enemy"] = NativeFn("find_closest_enemy") { a, _ ->
             val enemies = pyToBoxes(a.getOrNull(0))
