@@ -1,0 +1,51 @@
+# Labels describe changed surfaces, not correctness, approval or measured performance.
+# Multiple labels may apply. Keep manually assigned labels outside this configuration.
+'area:engine':
+  - changed-files:
+      - any-glob-to-any-file: 'app/src/**/java/com/pyla/ai/engine/**'
+'area:input':
+  - changed-files:
+      - any-glob-to-any-file:
+          - 'app/src/**/java/com/pyla/ai/input/**'
+          - 'app/src/**/java/com/pyla/ai/capture/InputCoordinates*'
+'area:vision':
+  - changed-files:
+      - any-glob-to-any-file:
+          - 'app/src/**/java/com/pyla/ai/capture/**'
+          - 'app/src/**/java/com/pyla/ai/engine/Detect*'
+          - 'app/src/**/java/com/pyla/ai/engine/*Ocr*'
+          - 'app/src/**/java/com/pyla/ai/engine/StateFinder*'
+          - 'app/src/**/java/com/pyla/ai/engine/VideoScreenStateCues*'
+          - 'app/src/main/assets/pyla/images/**'
+          - 'app/src/main/assets/pyla/models/**'
+'area:overlay':
+  - changed-files:
+      - any-glob-to-any-file: 'app/src/**/java/com/pyla/ai/overlay/**'
+'area:diagnostics':
+  - changed-files:
+      - any-glob-to-any-file:
+          - 'app/src/**/java/com/pyla/ai/diagnostics/**'
+          - 'app/src/main/java/com/pyla/ai/ui/DiagnosticPanel.kt'
+          - 'docs/DIAGNOSTICS.md'
+'area:interpreter':
+  - changed-files:
+      - any-glob-to-any-file:
+          - 'app/src/**/java/com/pyla/ai/pyla/**'
+          - 'app/src/main/assets/pyla/playstyles/**'
+tests:
+  - changed-files:
+      - any-glob-to-any-file:
+          - 'app/src/test/**'
+          - 'app/src/androidTest/**'
+documentation:
+  - changed-files:
+      - any-glob-to-any-file: '**/*.md'
+ci:
+  - changed-files:
+      - any-glob-to-any-file:
+          - '.github/**'
+          - '**/*.gradle.kts'
+          - 'gradle/**'
+          - 'gradle.properties'
+          - 'gradlew'
+          - 'gradlew.bat'

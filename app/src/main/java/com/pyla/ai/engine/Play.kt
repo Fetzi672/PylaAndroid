@@ -1027,10 +1027,10 @@ class Play(
     }
 
     private fun boxToPy(box: FloatArray): PyList =
-        PyList(box.map { it.toDouble() as Any }.toMutableList())
+        PyList(box.mapTo(ArrayList<Any>(box.size)) { it.toDouble() as Any })
 
     private fun boxesToPy(boxes: List<FloatArray>): PyList =
-        PyList(boxes.map { boxToPy(it) as Any }.toMutableList())
+        PyList(boxes.mapTo(ArrayList<Any>(boxes.size)) { boxToPy(it) as Any })
 
     private fun pyToBox(v: Any?): FloatArray {
         val items = when (v) {
