@@ -28,15 +28,7 @@ object BrawlTrackerApi {
             val url = URL("${BRAWLTRACKER_URL}/api/player/${URLEncoder.encode(tag, "UTF-8")}")
             val json = httpGetJson(url) ?: return@withContext emptyList()
             val brawlers = json.optJSONArray("brawlers") ?: return@withContext emptyList()
-            val out = mutableListOf<BrawlerStats>()
-            for (i in 0 until brawlers.length()) {
-                val b = brawlers.getJSONObject(i)
-                out.add(BrawlerStats(
-                    name = b.optString("name", "").lowercase(),
-                    trophies = b.optInt("trophies", 0),
-                    powerLevel = b.optInt("power", 0),
-                ))
-            }
+            val out = parseBrawlers(brawlers)
             Log.i(TAG, "Fetched ${out.size} brawlers for tag #$tag from BrawlTracker")
             out
         } catch (e: Exception) {
@@ -50,21 +42,26 @@ object BrawlTrackerApi {
             val url = URL("https://api.brawlify.com/v1/players/%23$tag")
             val json = httpGetJson(url) ?: return@withContext emptyList()
             val brawlers = json.optJSONArray("brawlers") ?: return@withContext emptyList()
-            val out = mutableListOf<BrawlerStats>()
-            for (i in 0 until brawlers.length()) {
-                val b = brawlers.getJSONObject(i)
-                out.add(BrawlerStats(
-                    name = b.optString("name", "").lowercase(),
-                    trophies = b.optInt("trophies", 0),
-                    powerLevel = b.optInt("power", 0),
-                ))
-            }
+            val out = parseBrawlers(brawlers)
             Log.i(TAG, "Fetched ${out.size} brawlers for tag #$tag from Brawlify")
             out
         } catch (e: Exception) {
             Log.e(TAG, "Brawlify fetch also failed: ${e.message}")
             emptyList()
         }
+    }
+
+    private fun parseBrawlers(brawlers: org.json.JSONArray): List<BrawlerStats> {
+        val out = mutableListOf<BrawlerStats>()
+        for (i in 0 until brawlers.length()) {
+            val b = brawlers.getJSONObject(i)
+            out.add(BrawlerStats(
+                name = b.optString("name", "").lowercase(),
+                trophies = b.optInt("trophies", 0),
+                powerLevel = b.optInt("power", 0),
+            ))
+        }
+        return out
     }
 
     private fun httpGetJson(url: URL): JSONObject? {
