@@ -1,26 +1,58 @@
-# Current Android development snapshot
+# Fork status — current Android development snapshot
 
-Upstream: https://github.com/countryside99/PylaAndroid. Original attribution and the CC BY-NC 4.0 license from this snapshot's source baseline are retained. Upstream subsequently changed its license to GPLv3; this PR does not import that change or newer upstream code, and does not claim to relicense third-party game artwork.
+- **Upstream:** https://github.com/countryside99/PylaAndroid
+- **Beta release candidate:** `3.0.1-beta (21)`, tag `v3.0.1`. Matching beta APKs belong on the [original project's releases page](https://github.com/countryside99/PylaAndroid/releases); verify the tag and checksum before installing. The earlier `1.1.18-dev (20)` test build remains on the contribution fork.
 
-This branch brings the current Android source snapshot into the fork for review. It is a development candidate, not an upstream release or a guarantee of unattended gameplay on every phone.
+This community contribution is now available as an **experimental beta** in the original project. It is not a stable production release and **not a guarantee of unattended gameplay on any phone**. For concrete defects and limits, see [KNOWN_ISSUES.md](KNOWN_ISSUES.md); for diagnostics, see [DIAGNOSTICS.md](DIAGNOSTICS.md).
 
-## Included behavior
+## Status: EARLY BETA / EXPERIMENTAL
 
-- Bounded diagnostics with explicit Confirm/Cancel consent before upload.
-- Fresh, exact brawler recognition, vertical grid search, localized card taps, DETAIL SELECT confirmation and verified lobby return. Already committed card/SELECT taps are not replayed.
-- DETAIL confirmation checks stability around the title and SELECT control instead of rejecting unrelated background animation. Individual OCR attempts are capped at two seconds within the unchanged 15-second phase; the three-second pair freshness limit remains unchanged.
-- Missing, ambiguous, wrong, shifted or covered controls, stale/future frames, cancellation, lost authority and expired deadlines remain fail-closed.
-- Continuous movement and attack pulses during admitted gameplay, bounded blocked-path recovery, geometry-aware input composition, and verified defeated-screen EXIT continuation. Unrecognized gameplay never grants input authority.
-- The fourteen small `video_state_cues` crops required by the current recognizer are explicitly included despite the generated-asset ignore rule. Existing models and assets are unchanged; the crops do not grant rights to third-party game artwork.
+Everything here is early beta. Treat every run as supervised. The project does not promise that the bot plays a full match correctly on your device.
 
-## Validation and limits
+## License and attribution
 
-The source snapshot passed 463 JVM tests and 93 private composed selector cases, including realistic OCR timeout consumption. The private host fixtures use Android/OCR doubles and a synthetic clock; they are not a phone/game proof. The private API-36 emulator gates covered movement/attack/EXIT input composition, v18-to-v19 update with retained configuration, and clean installation. A real ML Kit reference-replay probe accepted synthetic changes outside the title/SELECT windows and denied changed SELECT controls, missing identity and expiry. These probes use a retained screenshot, not a live game server or the user's phone.
+- Original attribution and the upstream project link are preserved.
+- The project is now licensed under the **GNU General Public License v3.0** — see [LICENSE](../LICENSE).
+- This relicensing covers the project's own source only. It does **not** relicense third-party game artwork or any asset whose rights belong to others.
+- The [CC BY-NC 4.0](https://creativecommons.org/licenses/by-nc/4.0/) license applied to earlier snapshots of this fork's source baseline only. Any statement that CC BY-NC 4.0 still governs the current project is stale.
 
-The clean PR worktree is separately compiled and tested before publication. `BrawlerDetailSelectTest` has optional full-reference image checks enabled with `PYLA_DETAIL_FIXTURE_DIR`; without that private fixture directory those optional image checks are not evidence of recognition accuracy. No private reports, fixture recordings, credentials, signing material or APKs are included in this PR.
+## What works today
 
-## Build and privacy boundaries
+The following behaviours are user-reported as reliable in current builds:
 
-Use Java 17, Android SDK 34 and Gradle 8.9. Upstream-tracked cfg/models/images/playstyles remain available. `copyPylaAssets` can refresh them from an optional `PylaAI-OriginalPCVersion` directory. The supplied cue crops remain tracked for a fresh checkout.
+- **Name-based brawler selection and scrolling.** Selection is driven by recognised names rather than fixed card positions, so it follows the list as it scrolls.
+- **Automatic attacks.** Attack input fires during admitted gameplay.
+- **Stuck detection with a walk-around recovery.** When the bot detects that it is stuck, it attempts a bounded move to free itself.
+- **Input stops when the app is closed.** Closing the app stops input as expected; this is improved but not guaranteed in every situation (see [KNOWN_ISSUES.md](KNOWN_ISSUES.md)).
 
-`PYLA_DIAGNOSTIC_UPLOAD_TOKEN` is supplied externally for an owner diagnostic build, never committed. An ordinary build without it cannot use the owner's private log-upload capability. The configured diagnostic endpoint is not a public service entitlement. Diagnostics do not collect screenshot pixels or raw OCR content. The optional Mobile Tactical experiment is not installed as a default playstyle.
+## Partially reliable
+
+These work some of the time and should not be relied on:
+
+- **Movement.** Movement is only partially reliable.
+- **Solo Showdown EXIT.** Leaving Solo Showdown is unreliable; the bot may not exit cleanly.
+
+## Known limits and assumptions
+
+- **Trophy counting is wrong across the 0–1000 range.** The counter wrongly admits `1014`; at prestige 1 a value of `14` was observed. See [KNOWN_ISSUES.md](KNOWN_ISSUES.md).
+- **Device coverage is one phone.** Only a **Samsung Galaxy S26 Ultra** has been tested. The exact game app version and Android version were not recorded, so behaviour on other devices and versions is unknown.
+- **English only.** The game must be set to English.
+- **Coordinate scaling is not proven universal.** Dynamic coordinate scaling is implemented, but it is not proven to work across all screen resolutions. Coordinate templates and OCR bands remain **assumptions**, not universal layout guarantees.
+
+## Safety
+
+To stop the bot immediately, turn off the accessibility service for PylaAndroid (**Settings → Accessibility → PylaAndroid**). If the phone cannot be controlled and you cannot regain control, follow your **manufacturer's force-restart instructions** (for example, press and hold Power, or Power + Volume Down). A forced restart is a safety fallback, **not** a routine part of the workflow.
+
+## Diagnostics (summary)
+
+Diagnostic upload is opt-in and requires explicit Confirm/Cancel consent. Reports are redacted and are intended to exclude screenshots, raw OCR text and credentials — this is the design intent, not a promise that a report can never contain anything sensitive. Full details live in [DIAGNOSTICS.md](DIAGNOSTICS.md). Sharing a report ID publicly may allow others to read it; review before posting.
+
+## Validation
+
+Prior hosted CI on fork source `5dbc1a5f426b91c643ad0ab76355465ce1a3c553`: **448 JVM tests passed, 15 optional image-fixture checks were skipped, and Android lint reported 0 errors and 40 warnings.** This is historical evidence, not the final-head verdict for this contribution; see the PR checks and release notes for the actual source-matched results. The skipped checks are the optional full-reference image comparisons in `BrawlerDetailSelectTest`, gated behind `PYLA_DETAIL_FIXTURE_DIR`; hosted CI does not exercise them, so a green JVM run is not a recognition-accuracy or gameplay proof. Additional private composed-selector cases are run on the development host. No private reports, fixture recordings, credentials, signing material or APKs are included in this contribution.
+
+## Build boundaries
+
+**Installation/signing:** This beta preserves the signing certificate of the contribution build `1.1.18-dev (20)`, not the different certificate used by the original `v3.0.0` APK. Android cannot update that original installation in place with this APK. Preserve needed configuration before uninstalling the old app; then install this beta and grant the required permissions again. Uninstalling can remove app data.
+
+Use Java 17, Android SDK 34 and Gradle 8.9. `PYLA_DIAGNOSTIC_UPLOAD_TOKEN` is supplied externally for an owner diagnostic build and is never committed; an ordinary build without it cannot use the private upload path.

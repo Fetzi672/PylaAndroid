@@ -244,9 +244,10 @@ fun DiagnosticPanel(modifier: Modifier = Modifier) {
             text = {
                 Column {
                     Text(
-                        "Your private text event log, the app version and this device's " +
-                            "Android API level are uploaded to the project owner and kept " +
-                            "for 7 days.",
+                        "Your redacted PylaAndroid event log, app version and Android API " +
+                            "level are sent to pyla-logs.fetzi-ai.de and stored on Cloudflare. " +
+                            "Reports expire after 7 days. Anyone with your report ID can view " +
+                            "the report after human verification; review it before sharing the ID.",
                         color = PylaColors.TextMed,
                         fontSize = 13.sp,
                     )
@@ -265,10 +266,8 @@ fun DiagnosticPanel(modifier: Modifier = Modifier) {
     }
 }
 
-/**
- * Copies only the correlation id. A report id is never a privileged read link:
- * reading a stored report requires a separate, server-side admin credential.
- */
+/** Copies the exact report ID. Its holder may read the report through the public
+ * viewer after human verification; never imply that the ID is safe to post publicly. */
 private fun copyReportId(context: Context, reportId: String) {
     runCatching {
         val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager

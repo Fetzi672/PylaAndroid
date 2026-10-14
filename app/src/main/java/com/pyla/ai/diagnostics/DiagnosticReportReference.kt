@@ -3,7 +3,8 @@ package com.pyla.ai.diagnostics
 import java.math.BigInteger
 
 /**
- * Public correlation label, not an access token or download URL.
+ * Exact random report reference. With the current public viewer, its holder may
+ * read the report after human verification; treat the reference as a capability.
  * Encodes the ENTIRE existing random UUID losslessly; never truncates it or
  * creates a second upload identity. Only the verified-success UI exposes it.
  */
@@ -19,7 +20,7 @@ object DiagnosticReportReference {
         return PREFIX + encoded.padStart(DIGITS, '0')
     }
 
-    /** Owner-side correlation: the private backend still requires admin auth. */
+    /** Decoding preserves identity only; it does not authorize a read or bypass viewer verification. */
     fun toReportId(reference: String): String {
         require(referencePattern.matches(reference)) { "Invalid report reference" }
         val value = BigInteger(reference.substring(PREFIX.length), 36)
