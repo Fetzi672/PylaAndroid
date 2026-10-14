@@ -394,7 +394,7 @@ class PyInterpreter(val globals: Scope) {
         "split" -> NativeFn("str.split") { a, _ ->
             val parts = if (a.isEmpty() || a[0] is PyNone) s.trim().split(Regex("\\s+")).filter { it.isNotEmpty() }
             else s.split(a[0] as String)
-            PyList(parts.map { it as Any }.toMutableList())
+            PyList(parts.mapTo(ArrayList(parts.size)) { it as Any })
         }
         "replace" -> NativeFn("str.replace") { a, _ -> s.replace(a[0] as String, a[1] as String) }
         "startswith" -> NativeFn("str.startswith") { a, _ -> s.startsWith(a[0] as String) }
