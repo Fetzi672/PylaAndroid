@@ -586,9 +586,9 @@ class Play(
             val (walls, bushes) = processTileData(td)
             timeSinceWallsChecked = currentTime
             lastWallsData = walls; lastBushesData = bushes
-            data["wall"] = walls.toMutableList(); data["bush"] = bushes.toMutableList()
+            data["wall"] = ArrayList(walls); data["bush"] = ArrayList(bushes)
         } else {
-            data["wall"] = lastWallsData.toMutableList(); data["bush"] = lastBushesData.toMutableList()
+            data["wall"] = ArrayList(lastWallsData); data["bush"] = ArrayList(lastBushesData)
         }
 
         // Observe raw detections before the missing-player path discards them.
