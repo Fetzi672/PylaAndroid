@@ -116,6 +116,7 @@ object PlaystyleRegistry {
 
     private const val TAG = "PlaystyleRegistry"
     const val DEFAULT_PLAYSTYLE = "universal_smart_v5_Slarckvul_Eddition.pyla"
+    private val NAME_SANITIZE_REGEX = Regex("[^A-Za-z0-9._-]")
 
     fun playstylesDir(): File {
         val dir = PylaConfig.resolve("playstyles")
@@ -184,6 +185,6 @@ object PlaystyleRegistry {
 
     private fun sanitizeName(name: String): String {
         val base = File(name).name
-        return base.replace(Regex("[^A-Za-z0-9._-]"), "_")
+        return base.replace(NAME_SANITIZE_REGEX, "_")
     }
 }
