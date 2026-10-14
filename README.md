@@ -66,6 +66,4 @@ PylaAndroid can prepare a diagnostic report to help diagnose problems. Upload is
 
 ## License
 
-The project is distributed under the **GNU General Public License v3.0** — see [LICENSE](LICENSE) and [GNU GPL 3.0](https://www.gnu.org/licenses/gpl-3.0.en.html).
-
-Earlier snapshots of this fork's source baseline were released under [CC BY-NC 4.0](https://creativecommons.org/licenses/by-nc/4.0/); that applied to those snapshots only and is no longer the project license. This relicensing covers the project's own source code and **does not relicense third-party game artwork** or any asset whose rights belong to someone else.
+The project is distributed under the **CC BY-NC 4.0** license — see [LICENSE](LICENSE) and [CC BY-NC 4.0](https://creativecommons.org/licenses/by-nc/4.0/)).
