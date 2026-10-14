@@ -182,6 +182,8 @@ class OverlayService : Service() {
         private val rad = 16f * density
         private val pad = 14f * density
 
+        private val iconBounds = RectF()
+
         private var downX = 0f
         private var downY = 0f
         private var pStartX = 0
@@ -272,15 +274,20 @@ class OverlayService : Service() {
             c.drawRoundRect(r, 10f * density, 10f * density, strokeBtn)
             val icx = r.left + r.width() / 2
             val icy = r.top + 16f * density
+            val iconR = 9f * density
+            iconBounds.set(icx - iconR, icy - iconR, icx + iconR, icy + iconR)
             iconP.color = if (enabled) accentColor else Color.argb((a * 110) / 255, 132, 139, 153)
-            drawIcon(c, icon, icx, icy, 9f * density, iconP)
+            drawIcon(c, icon, iconBounds, iconP)
             labelP.color = if (enabled) accentColor else Color.argb((a * 130) / 255, 132, 139, 153)
             labelP.textAlign = Paint.Align.CENTER
             c.drawText(label, r.left + r.width() / 2, r.bottom - 7f * density, labelP)
             labelP.textAlign = Paint.Align.LEFT
         }
 
-        private fun drawIcon(c: Canvas, icon: OverlayIcon, cx: Float, cy: Float, r: Float, paint: Paint) {
+        private fun drawIcon(c: Canvas, icon: OverlayIcon, bounds: RectF, paint: Paint) {
+            val cx = bounds.centerX()
+            val cy = bounds.centerY()
+            val r = bounds.width() / 2f
             val p = Path()
             when (icon) {
                 OverlayIcon.PLAY -> {
