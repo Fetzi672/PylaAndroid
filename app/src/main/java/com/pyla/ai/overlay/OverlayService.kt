@@ -24,6 +24,16 @@ import kotlin.math.roundToInt
 private enum class OverlayIcon { PLAY, PAUSE, STOP }
 private enum class OverlayHit { HEADER, START, PAUSE, STOP, NONE }
 
+private data class BtnParams(
+    val c: Canvas,
+    val r: RectF,
+    val label: String,
+    val accentColor: Int,
+    val enabled: Boolean,
+    val icon: OverlayIcon,
+    val a: Int
+)
+
 /**
  * Minimal floating control surface drawn entirely with platform Canvas (no Compose), so it
  * incurs no composition cost while the game is foreground.
@@ -259,12 +269,13 @@ class OverlayService : Service() {
             canvas.drawText(fitted(actionText), pad, headerHeight + 52f * density, actionP)
 
             val rects = buttonRects()
-            drawBtn(canvas, rects[0], "Start", GREEN, !running, OverlayIcon.PLAY, a)
-            drawBtn(canvas, rects[1], if (paused) "Resume" else "Pause", ACCENT, running, OverlayIcon.PAUSE, a)
-            drawBtn(canvas, rects[2], "Stop", RED, running, OverlayIcon.STOP, a)
+            drawBtn(BtnParams(canvas, rects[0], "Start", GREEN, !running, OverlayIcon.PLAY, a))
+            drawBtn(BtnParams(canvas, rects[1], if (paused) "Resume" else "Pause", ACCENT, running, OverlayIcon.PAUSE, a))
+            drawBtn(BtnParams(canvas, rects[2], "Stop", RED, running, OverlayIcon.STOP, a))
         }
 
-        private fun drawBtn(c: Canvas, r: RectF, label: String, accentColor: Int, enabled: Boolean, icon: OverlayIcon, a: Int) {
+        private fun drawBtn(params: BtnParams) {
+            val (c, r, label, accentColor, enabled, icon, a) = params
             bgBtn.color = Color.argb((a * (if (enabled) 28 else 12)) / 255, 232, 236, 244)
             c.drawRoundRect(r, 10f * density, 10f * density, bgBtn)
             strokeBtn.color = if (enabled) Color.argb((a * 80) / 255, Color.red(accentColor), Color.green(accentColor), Color.blue(accentColor))
