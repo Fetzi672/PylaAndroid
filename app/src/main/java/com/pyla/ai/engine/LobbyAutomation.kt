@@ -209,19 +209,22 @@ class LobbyAutomation(
      * of a narrow tile can never carry pixels of a previous frame.
      */
     private fun gridMosaic(plan: GridOcrPlan, source: Bitmap): Bitmap {
-        val targetW = plan.width
-        val targetH = plan.height
-        var target = gridOcrBitmap
+        val target = buildMosaicBitmap(plan.width, plan.height, plan.tiles, source, gridOcrBitmap)
+        gridOcrBitmap = target
+        return target
+    }
+
+    private fun buildMosaicBitmap(width: Int, height: Int, tiles: List<GridOcrTile>, source: Bitmap, previousTarget: Bitmap?): Bitmap {
+        var target = previousTarget
         if (target == null || target.isRecycled || !target.isMutable ||
-            target.width != targetW || target.height != targetH
+            target.width != width || target.height != height
         ) {
             target?.recycle()
-            target = Bitmap.createBitmap(targetW, targetH, Bitmap.Config.ARGB_8888)
-            gridOcrBitmap = target
+            target = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
         }
         val canvas = Canvas(target)
         canvas.drawColor(android.graphics.Color.BLACK)
-        for (tile in plan.tiles) {
+        for (tile in tiles) {
             canvas.drawBitmap(
                 source,
                 android.graphics.Rect(tile.source.left, tile.source.top, tile.source.right, tile.source.bottom),
@@ -340,27 +343,8 @@ class LobbyAutomation(
      * pixels. Owned separately from the other OCR bitmaps, and recycled in [close].
      */
     private fun lobbyReturnMosaic(plan: BrawlerLobbyReturnGate.Plan, source: Bitmap): Bitmap {
-        var target = lobbyReturnBitmap
-        if (target == null || target.isRecycled || !target.isMutable ||
-            target.width != plan.width || target.height != plan.height
-        ) {
-            target?.recycle()
-            target = Bitmap.createBitmap(plan.width, plan.height, Bitmap.Config.ARGB_8888)
-            lobbyReturnBitmap = target
-        }
-        val canvas = Canvas(target)
-        canvas.drawColor(android.graphics.Color.BLACK)
-        for (tile in plan.tiles) {
-            canvas.drawBitmap(
-                source,
-                android.graphics.Rect(tile.source.left, tile.source.top, tile.source.right, tile.source.bottom),
-                android.graphics.Rect(
-                    tile.destination.left, tile.destination.top,
-                    tile.destination.right, tile.destination.bottom,
-                ),
-                scalePaint,
-            )
-        }
+        val target = buildMosaicBitmap(plan.width, plan.height, plan.tiles, source, lobbyReturnBitmap)
+        lobbyReturnBitmap = target
         return target
     }
 
