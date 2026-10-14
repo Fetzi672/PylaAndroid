@@ -31,6 +31,13 @@ import kotlin.math.round
 import kotlin.math.sin
 import kotlin.math.sqrt
 
+data class CombatContext(
+    val playerPos: Pair<Double, Double>,
+    val enemyPos: Pair<Double, Double>,
+    val walls: List<FloatArray>,
+    val skillType: String
+)
+
 class Play(
     val windowController: WindowController,
     mainInfoModelPath: String,
@@ -245,9 +252,9 @@ class Play(
         return false
     }
 
-    fun isEnemyHittable(playerPos: Pair<Double, Double>, enemyPos: Pair<Double, Double>, walls: List<FloatArray>, skillType: String): Boolean {
-        if (canAttackThroughWalls(currentBrawler ?: "", skillType)) return true
-        return !wallsBlockLineOfSight(playerPos, enemyPos, walls)
+    fun isEnemyHittable(context: CombatContext): Boolean {
+        if (canAttackThroughWalls(currentBrawler ?: "", context.skillType)) return true
+        return !wallsBlockLineOfSight(context.playerPos, context.enemyPos, context.walls)
     }
 
     fun findClosestEnemy(enemyData: List<FloatArray>?, playerCoords: Pair<Double, Double>, walls: List<FloatArray>, skillType: String): Pair<Pair<Double, Double>?, Double?> {
@@ -256,7 +263,7 @@ class Play(
         var unhitClosestD = Double.MAX_VALUE; var unhitClosest: Pair<Double, Double>? = null
         for (e in enemyData) {
             val ep = getEntityPos(e); val d = getDistance(ep, playerCoords)
-            if (isEnemyHittable(playerCoords, ep, walls, skillType)) {
+            if (isEnemyHittable(CombatContext(playerCoords, ep, walls, skillType))) {
                 if (d < hitClosestD) { hitClosestD = d; hitClosest = ep }
             } else {
                 if (d < unhitClosestD) { unhitClosestD = d; unhitClosest = ep }
@@ -1163,7 +1170,7 @@ class Play(
             val ep = pyToPair(a.getOrNull(1)) ?: (0.0 to 0.0)
             val walls = pyToBoxes(a.getOrNull(2))
             val skill = a.getOrNull(3) as? String ?: "attack"
-            isEnemyHittable(pp, ep, walls, skill)
+            isEnemyHittable(CombatContext(pp, ep, walls, skill))
         }
         ctx["rotate_movement"] = NativeFn("rotate_movement") { a, _ ->
             val m = pyToPair(a.getOrNull(0)) ?: (0.0 to 0.0)

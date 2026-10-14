@@ -59,7 +59,7 @@ internal object PlaystyleCombat {
 
         if (ctx.isSuperReady && ctx.persistentData.timeSinceHoldingAttack == null) {
             val superType = brawlerInfo?.superType ?: "damage"
-            val enemyHittable = play.isEnemyHittable(playerPos, enemyCoords, ctx.walls, "super")
+            val enemyHittable = play.isEnemyHittable(CombatContext(playerPos, enemyCoords, ctx.walls, "super"))
             if (enemyHittable && (enemyDistance <= superRange ||
                     superType in setOf("spawnable", "other") ||
                     (ctx.brawler in setOf("stu", "surge") && superType == "charge" && enemyDistance <= superRange + attackRange))) {
@@ -69,7 +69,7 @@ internal object PlaystyleCombat {
         }
 
         if (enemyDistance <= attackRange) {
-            val enemyHittable = play.isEnemyHittable(playerPos, enemyCoords, ctx.walls, "attack")
+            val enemyHittable = play.isEnemyHittable(CombatContext(playerPos, enemyCoords, ctx.walls, "attack"))
             if (enemyHittable) {
                 if (ctx.isGadgetReady && ctx.persistentData.timeSinceHoldingAttack == null) play.useGadget()
                 if (!mustBrawlerHoldAttack) {
@@ -355,7 +355,7 @@ object UniversalPlaystyle : Playstyle {
     private fun tryUseSuper(ctx: PlayContext, playerPos: Pair<Double, Double>, enemyCoords: Pair<Double, Double>, enemyDistance: Double, attackRange: Int, superRange: Int, info: BrawlerInfo) {
         if (!ctx.isSuperReady) return
         if (ctx.persistentData.timeSinceHoldingAttack != null) return
-        val enemyHittable = ctx.play.isEnemyHittable(playerPos, enemyCoords, ctx.walls, "super")
+        val enemyHittable = ctx.play.isEnemyHittable(CombatContext(playerPos, enemyCoords, ctx.walls, "super"))
         val shouldSuper = enemyHittable && (enemyDistance <= superRange ||
                 info.superType in setOf("spawnable", "other") ||
                 (ctx.brawler in setOf("stu", "surge") && info.superType == "charge" && enemyDistance <= superRange + attackRange))
@@ -367,7 +367,7 @@ object UniversalPlaystyle : Playstyle {
 
     private fun tryAttack(ctx: PlayContext, playerPos: Pair<Double, Double>, enemyCoords: Pair<Double, Double>, enemyDistance: Double, attackRange: Int, info: BrawlerInfo, allowWallAttack: Boolean): Boolean {
         if (enemyDistance > attackRange) return false
-        val enemyHittable = ctx.play.isEnemyHittable(playerPos, enemyCoords, ctx.walls, "attack")
+        val enemyHittable = ctx.play.isEnemyHittable(CombatContext(playerPos, enemyCoords, ctx.walls, "attack"))
         if (enemyHittable || allowWallAttack) {
             if (ctx.isGadgetReady && ctx.persistentData.timeSinceHoldingAttack == null &&
                 PlaystyleCombat.nowSec() - ctx.persistentData.lastGadgetUse > 3.0) {
