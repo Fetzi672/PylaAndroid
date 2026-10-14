@@ -31,6 +31,8 @@ import kotlin.math.round
 import kotlin.math.sin
 import kotlin.math.sqrt
 
+data class SweptCircle(val p1: Pair<Double, Double>, val p2: Pair<Double, Double>, val radius: Double)
+
 class Play(
     val windowController: WindowController,
     mainInfoModelPath: String,
@@ -223,8 +225,11 @@ class Play(
         return dx * dx + dy * dy
     }
 
-    fun wallsBlockSweptCircle(p1: Pair<Double, Double>, p2: Pair<Double, Double>, radius: Double, walls: List<FloatArray>): Boolean {
+    fun wallsBlockSweptCircle(sweptCircle: SweptCircle, walls: List<FloatArray>): Boolean {
         if (walls.isEmpty()) return false
+        val p1 = sweptCircle.p1
+        val p2 = sweptCircle.p2
+        val radius = sweptCircle.radius
         val minx = minOf(p1.first, p2.first); val maxx = maxOf(p1.first, p2.first)
         val miny = minOf(p1.second, p2.second); val maxy = maxOf(p1.second, p2.second)
         val r = kotlin.math.ceil(radius).toInt()
@@ -322,7 +327,7 @@ class Play(
         val (center, radius) = getPlayerHitCircle(playerBox)
         if (center.first == 0.0 && center.second == 0.0 && playerBox == null) return false
         val newPos = (center.first + dx) to (center.second + dy)
-        return wallsBlockSweptCircle(center, newPos, radius, walls)
+        return wallsBlockSweptCircle(SweptCircle(center, newPos, radius), walls)
     }
 
     fun isTherePoisonGas(playerBox: FloatArray?, threshold: Int = 7000, areaFromPlayerChecked: Double = 1.5): Map<String, Int> {
@@ -928,7 +933,7 @@ class Play(
             capturedAtMs = capturedAtMs,
             nowMs = now,
             progressObserved = progress,
-            wallProbe = { from, to, r -> wallsBlockSweptCircle(from, to, r, walls) },
+            wallProbe = { from, to, r -> wallsBlockSweptCircle(SweptCircle(from, to, r), walls) },
         )
     }
 
