@@ -10,6 +10,7 @@ import com.pyla.ai.engine.PylaLog
 import com.pyla.ai.engine.PylaLog as Log
 import com.pyla.ai.capture.CaptureService
 import com.pyla.ai.config.PylaConfig
+import com.pyla.ai.config.PlaystyleSelection
 import com.pyla.ai.diagnostics.DiagnosticLog
 import com.pyla.ai.pyla.PlaystyleRegistry
 import org.json.JSONArray
@@ -25,7 +26,9 @@ class BotEngine(
         private const val TAG = "PylaEngine"
         private const val CAPTURE_STARTUP_TIMEOUT_MS = 15_000L
         private const val NO_DETECTIONS_ACTION_THRESHOLD_SEC = 8 * 60.0
+        private val sessionOwnershipLock = Any()
         @Volatile var instance: BotEngine? = null
+            private set
 
         /**
          * Maximum age of the admitted-match evidence that may authorise a no-detections recovery.
@@ -100,17 +103,44 @@ class BotEngine(
     private val paused = AtomicBoolean(false)
     private val stateLock = Any()
     private val stateAuthority = GameStateAuthority()
+    private var stateRevision = 0L // Protected by stateLock; binds observations across Pause/Resume.
+
+    // Per-session lifecycle authority for engine-initiated side effects (crash/no-detection
+    // relaunch and idle reconnect). It fails closed: an unconfigured or non-owning session denies.
+    // Each side effect binds its own request via beginRequest() and re-evaluates it immediately
+    // before acting and again at queued dispatch — a boolean sampled once before a loop cannot
+    // revoke a retained request across an unsampled Pause->Resume.
+    private val sessionAuthority = EngineSessionAuthority(
+        sessionLive = { instance === this && !stopRequested.get() && !paused.get() },
+    )
+
+    // Settled-session ownership: the instance is retained until BOTH the main worker's resource
+    // cleanup AND the state-checker worker have settled, then cleared iff it is still the owner.
+    // A delayed cleanup from an old session therefore cannot clear a new owner, reset new status or
+    // release newly-owned input.
+    @Volatile private var started = false
+    private val mainWorkerSettled = AtomicBoolean(false)
+    private val stateCheckerSettled = AtomicBoolean(false)
+    private val fullySettled = AtomicBoolean(false)
+    @Volatile private var stateWorkerStarted = false
+
+    /** True while this instance has been started and has not fully settled. */
+    fun isActive(): Boolean = started && !fullySettled.get()
+
     private val latestObservationAtMs: Long
         get() = stateAuthority.snapshot(SystemClock.elapsedRealtime()).capturedAtMs
     val latestState: String?
         get() = stateAuthority.snapshot(SystemClock.elapsedRealtime()).state
 
-    private fun gameplayInputAllowed(): Boolean = !stopRequested.get() && !paused.get() &&
+    private fun gameplayInputAllowed(): Boolean = instance === this &&
+        !stopRequested.get() && !paused.get() &&
         stateAuthority.snapshot(SystemClock.elapsedRealtime()).state == "match"
 
-    private fun observeState(observed: String, capturedAtMs: Long, gameplay: Boolean = false): String? {
+    private fun observeState(observed: String, capturedAtMs: Long, gameplay: Boolean = false,
+        expectedRevision: Long? = null): String? {
         val snapshot = synchronized(stateLock) {
-            if (stopRequested.get() || paused.get()) return latestState
+            if (instance !== this || stopRequested.get() || paused.get() ||
+                (expectedRevision != null && expectedRevision != stateRevision)) return latestState
             val now = SystemClock.elapsedRealtime()
             val next = if (gameplay && (observed == "match" || observed == "unknown"))
                 stateAuthority.gameplay(observed == "match", capturedAtMs, now)
@@ -160,8 +190,24 @@ class BotEngine(
     private var matchLoopSamples = 0
 
     fun start() {
-        stopRequested.set(false); paused.set(false)
-        instance = this
+        // Claim only an empty slot, including while an old owner is tearing down. A closed
+        // session is never restarted: its captured authorities are terminal by construction.
+        val claimed = synchronized(sessionOwnershipLock) {
+            if (instance != null || started || sessionAuthority.isClosed) false
+            else {
+                instance = this
+                started = true
+                true
+            }
+        }
+        if (!claimed) {
+            PylaLog.w(TAG, "start() ignored: engine ownership is unavailable")
+            return
+        }
+        fullySettled.set(false)
+        stateWorkerStarted = false
+        mainWorkerSettled.set(false)
+        stateCheckerSettled.set(false)
         BotStatus.engineRunning = true
         BotStatus.enginePaused = false
         BotStatus.lastError = ""
@@ -174,20 +220,31 @@ class BotEngine(
 
         DiagnosticLog.event("engine.start", "game=$gamePackage queue=${queueData.size} input=${BotStatus.inputConnected}")
         PylaLog.p(TAG, "Auto-opening Brawl Stars ($gamePackage)")
-        if (GameLauncher.launch(appContext, gamePackage)) {
+        val startup = sessionAuthority.beginRequest()
+        if (startup != null && startup.allows() && GameLauncher.launch(appContext, gamePackage)) {
             lastGameLaunchMs = System.currentTimeMillis()
         }
         loopThread = HandlerThread("pyla-bot-loop").apply { start() }
-        Handler(loopThread.looper).post {
+        val posted = Handler(loopThread.looper).post {
             try {
                 bootstrapAndRun()
             } catch (t: Throwable) {
                 PylaLog.e(TAG, "engine bootstrap failed", t)
-                BotStatus.error("Engine start failed: ${t.message}")
+                if (instance === this) BotStatus.error("Engine start failed: ${t.message}")
                 try { stop() } catch (_: Throwable) {}
             } finally {
                 cleanupResources()
+                // If the state worker never started (early return, or its post was refused) it can
+                // never settle itself; settle it here so ownership can complete.
+                if (!stateWorkerStarted) markStateCheckerSettled()
+                markMainWorkerSettled()
             }
+        }
+        if (!posted) {
+            // The loop thread was not running: the bootstrap can never execute. Settle now so a
+            // following start() is not blocked by a phantom active session.
+            if (!stateWorkerStarted) markStateCheckerSettled()
+            markMainWorkerSettled()
         }
     }
 
@@ -209,7 +266,7 @@ class BotEngine(
 
         windowController = WindowController(capture)
         timeManagement = TimeManagement()
-        lobbyAutomator = LobbyAutomation(windowController, selectionAllowed = { !stopRequested.get() && !paused.get() })
+        lobbyAutomator = LobbyAutomation(windowController, selectionAllowed = { instance === this && !stopRequested.get() && !paused.get() })
 
         val generalConfig = PylaConfig.load("cfg/general_config.toml")
         effectiveMaxIps = generalConfig.getString("max_ips", "auto").trim().toIntOrNull()
@@ -222,9 +279,7 @@ class BotEngine(
             .getDouble("check_if_brawl_stars_crashed", 5.0) * 1000.0)
             .toLong().coerceAtLeast(10L)
 
-        val selectedPlaystyle = PylaConfig.load("cfg/bot_config.toml")
-            .getString("current_playstyle", PlaystyleRegistry.DEFAULT_PLAYSTYLE)
-            .ifBlank { PlaystyleRegistry.DEFAULT_PLAYSTYLE }
+        val selectedPlaystyle = PlaystyleSelection.effectivePlaystyle()
         var pylaScript = PlaystyleRegistry.load(selectedPlaystyle)
         if (pylaScript == null && selectedPlaystyle != PlaystyleRegistry.DEFAULT_PLAYSTYLE) {
             PylaLog.w(TAG, "Playstyle '$selectedPlaystyle' failed to load, falling back to default")
@@ -265,7 +320,7 @@ class BotEngine(
             getState = { latestState },
             playstyleInfo = playstyleInfo,
             navigationAllowed = {
-                !stopRequested.get() && !paused.get() &&
+                instance === this && !stopRequested.get() && !paused.get() &&
                     com.pyla.ai.input.InputService.foregroundPackage() == gamePackage
             },
         )
@@ -274,14 +329,18 @@ class BotEngine(
         saveBrawlerData(queueData)
 
         stateThread = HandlerThread("pyla-state-checker", Process.THREAD_PRIORITY_BACKGROUND).apply { start() }
-        Handler(stateThread.looper).post {
+        val statePosted = Handler(stateThread.looper).post {
             try {
                 stateCheckerLoop()
             } catch (t: Throwable) {
                 PylaLog.e(TAG, "state checker died", t)
-                BotStatus.error("State checker failed: ${t.message}")
+                if (instance === this) BotStatus.error("State checker failed: ${t.message}")
+            } finally {
+                markStateCheckerSettled()
             }
         }
+        stateWorkerStarted = statePosted
+        if (!statePosted) PylaLog.w(TAG, "state checker post refused; it will be settled by bootstrap")
 
         PylaLog.p(TAG, "Initialization complete, starting main loop. queue=${queueData.size} brawlers")
         queueData.forEachIndexed { i, m -> PylaLog.p(TAG, "queue[$i]: brawler=${m["brawler"]} type=${m["type"]} trophies=${m["trophies"]} push_until=${m["push_until"]} auto=${m["automatically_pick"]}") }
@@ -289,20 +348,63 @@ class BotEngine(
     }
 
     fun stop() {
-        stopRequested.set(true)
+        val firstStop = !stopRequested.getAndSet(true)
+        // Terminal lifecycle revocation: every retained/in-flight request is denied forever.
+        sessionAuthority.close()
         if (::stageManager.isInitialized) stageManager.invalidateNavigation()
         stateAuthority.invalidate(SystemClock.elapsedRealtime())
-        try { if (::play.isInitialized) play.revokeCombat() } catch (_: Throwable) {}
-        try { if (::windowController.isInitialized) windowController.releaseMovement() } catch (_: Throwable) {}
-        if (::loopThread.isInitialized) loopThread.quitSafely()
-        if (::stateThread.isInitialized) stateThread.quitSafely()
-        if (instance === this) instance = null
-        BotStatus.engineRunning = false
-        BotStatus.enginePaused = false
-        BotStatus.currentState = ""
-        BotStatus.resetVerification()
+        // Release owned input exactly once, while this instance is still the owner. Cleanup of an
+        // old session must never release input newly owned by a later session; retaining ownership
+        // until full settlement guarantees that here.
+        val owner = instance === this
+        if (owner && firstStop) {
+            try { if (::play.isInitialized) play.revokeCombat() } catch (_: Throwable) {}
+            try { if (::windowController.isInitialized) windowController.releaseMovement() } catch (_: Throwable) {}
+        }
+        // quitSafely() drains pending messages but does NOT wake a loop blocked in Thread.sleep;
+        // interrupt so both workers actually observe stopRequested and settle.
+        if (::loopThread.isInitialized) { loopThread.quitSafely(); loopThread.interrupt() }
+        if (::stateThread.isInitialized) { stateThread.quitSafely(); stateThread.interrupt() }
+        // Publish stop status only as the owner, so an obsolete stop cannot reset a new session.
+        if (owner) {
+            BotStatus.engineRunning = false
+            BotStatus.enginePaused = false
+            BotStatus.currentState = ""
+            BotStatus.resetVerification()
+        }
         DiagnosticLog.event("engine.stop", "stopRequested=${stopRequested.get()}")
         Log.i(TAG, "Bot engine stopped")
+    }
+
+    /**
+     * Settle the main worker (resource cleanup finished) and, once BOTH workers have settled, clear
+     * ownership iff this instance is still the owner. Obsolete completion therefore cannot clear a
+     * new owner, reset new status or release newly-owned input.
+     */
+    private fun markMainWorkerSettled() {
+        mainWorkerSettled.set(true)
+        maybeCompleteSettlement()
+    }
+
+    private fun markStateCheckerSettled() {
+        stateCheckerSettled.set(true)
+        maybeCompleteSettlement()
+    }
+
+    private fun maybeCompleteSettlement() {
+        if (!mainWorkerSettled.get() || !stateCheckerSettled.get()) return
+        if (!fullySettled.compareAndSet(false, true)) return
+        // Reset status BEFORE releasing ownership. Otherwise a new owner can publish its running
+        // status between instance=null and these writes, only to have it erased by this worker.
+        if (instance === this) {
+            BotStatus.engineRunning = false
+            BotStatus.enginePaused = false
+            BotStatus.currentState = ""
+            BotStatus.resetVerification()
+        }
+        synchronized(sessionOwnershipLock) {
+            if (instance === this) instance = null
+        }
     }
 
     private fun cleanupResources() {
@@ -312,13 +414,21 @@ class BotEngine(
     }
 
     fun setPaused(p: Boolean) {
-        paused.set(p)
+        // Invalidate on BOTH Pause and Resume: a request admitted before an unsampled
+        // Pause->Resume pair is bound to a superseded epoch and can never be revived.
+        sessionAuthority.invalidate()
+        synchronized(stateLock) {
+            paused.set(p)
+            stateRevision++
+            stateAuthority.invalidate(SystemClock.elapsedRealtime())
+        }
         if (::stageManager.isInitialized) stageManager.invalidateNavigation()
-        stateAuthority.invalidate(SystemClock.elapsedRealtime())
-        if (p && ::play.isInitialized) play.resetCombat()
-        if (p && ::windowController.isInitialized) windowController.releaseMovement()
-        BotStatus.enginePaused = p && BotStatus.engineRunning
-        BotStatus.action(if (p) "Bot paused" else "Bot resumed")
+        if (instance === this) {
+            if (p && ::play.isInitialized) play.resetCombat()
+            if (p && ::windowController.isInitialized) windowController.releaseMovement()
+            BotStatus.enginePaused = p && BotStatus.engineRunning
+            BotStatus.action(if (p) "Bot paused" else "Bot resumed")
+        }
     }
 
     fun isPaused(): Boolean = paused.get()
@@ -342,6 +452,13 @@ class BotEngine(
         var lastCrashCheckMs = 0L
         var stateFrameBuffer: IntArray? = null
         while (!stopRequested.get()) {
+            if (instance !== this) return
+            val iteration = sessionAuthority.beginRequest() ?: return
+            if (!iteration.allows()) {
+                try { Thread.sleep(100) } catch (_: InterruptedException) {}
+                continue
+            }
+            val observationRevision = synchronized(stateLock) { stateRevision }
             try {
                 val now = System.currentTimeMillis()
                 if (now - lastCrashCheckMs >= crashCheckIntervalMs) {
@@ -375,7 +492,8 @@ class BotEngine(
                             priorAdmittedState = latestState
                             priorObservationAtMs = latestObservationAtMs
                         }
-                        val state = observeState(observed, copied.capturedAtMs) ?: "unknown"
+                        if (!iteration.allows()) { mat.release(); continue }
+                        val state = observeState(observed, copied.capturedAtMs, expectedRevision = observationRevision) ?: "unknown"
                         BotStatus.frameCount++
                         if (state != lastLoggedState) {
                             DiagnosticLog.event("state.transition", "${lastLoggedState ?: "<none>"} -> $state")
@@ -384,7 +502,21 @@ class BotEngine(
                         }
                         if (now - lastIdleCheckMs >= idleIntervalMs) {
                             lastIdleCheckMs = now
-                            try { lobbyAutomator.checkForIdle(mat) } catch (t: Throwable) { PylaLog.w(TAG, "idle check: ${t.message}") }
+                            // Bind this single reconnect to the current lifecycle epoch and carry the
+                            // guard, with the actual foreground + the original capture timestamp +
+                            // freshness, all the way to the non-replayable navigation queue. An
+                            // unsampled Pause->Resume, a stop, or a foreground loss denies it.
+                            val bound = iteration
+                            val idleGuard: () -> Boolean = run {
+                                val capturedAtMs = copied.capturedAtMs
+                                {
+                                    bound.allows() &&
+                                        com.pyla.ai.input.InputService.foregroundPackage() == gamePackage &&
+                                        capturedAtMs > 0L &&
+                                        SystemClock.elapsedRealtime() - capturedAtMs in 0L..WindowController.FRAME_STALE_TIMEOUT_MS
+                                }
+                            }
+                            try { lobbyAutomator.checkForIdle(mat, idleGuard) } catch (t: Throwable) { PylaLog.w(TAG, "idle check: ${t.message}") }
                         }
                         mat.release()
                         if (now - lastNoDetectionsCheckMs >= noDetectionsCheckIntervalMs) {
@@ -395,16 +527,19 @@ class BotEngine(
                                 priorAdmittedState, priorObservationAtMs, observed,
                                 SystemClock.elapsedRealtime(),
                             )
+                            // Bind a per-request lifecycle guard; a Pause/Stop before the effect
+                            // revokes it, and it is re-evaluated immediately before the relaunch.
+                            val recoveryGuard: () -> Boolean = { iteration.allows() }
                             if (recoveryAllowed && ::play.isInitialized) {
                                 val t = System.currentTimeMillis() / 1000.0
                                 val stale = play.timeSinceDetections.values.any {
                                     t - it > NO_DETECTIONS_ACTION_THRESHOLD_SEC
                                 }
-                                if (stale) {
+                                if (stale && recoveryGuard()) {
                                     val timeout = NO_DETECTIONS_ACTION_THRESHOLD_SEC.toInt()
                                     PylaLog.w(TAG, "No detections for ${timeout}s in match, reopening Brawl Stars")
                                     BotStatus.action("No detections for ${timeout}s, reopening Brawl Stars")
-                                    if (GameLauncher.launch(appContext, gamePackage)) lastGameLaunchMs = now
+                                    if (recoveryGuard() && GameLauncher.launch(appContext, gamePackage)) lastGameLaunchMs = now
                                     for (k in play.timeSinceDetections.keys) play.timeSinceDetections[k] = t
                                 }
                             }
@@ -419,16 +554,26 @@ class BotEngine(
     }
 
 
-    private fun gameWatchdog(now: Long) {
+    internal fun gameWatchdog(now: Long) {
+        // Bind a per-iteration lifecycle request; Pause/Stop (and non-ownership) deny it. A boolean
+        // sampled once before the loop cannot revoke a retained request across a later Pause.
+        val bound = sessionAuthority.beginRequest() ?: return
+        if (!bound.allows()) return
         val fg = com.pyla.ai.input.InputService.foregroundPackage() ?: return
         if (fg == gamePackage || fg == appContext.packageName) return
 
         // The PC setting check_if_brawl_stars_crashed is the cadence for this check. If the game is
         // not foreground at that check, relaunch it immediately instead of applying a second hidden
         // Android-only delay.
+        //
+        // Recovery relaunch is legitimately authorized while a FOREIGN app is foreground, so game
+        // foreground is deliberately NOT required here; only live session/ownership authorizes it.
         PylaLog.w(TAG, "Brawl Stars not in foreground (current=$fg), relaunching")
+        // Enforce the guard once more immediately before the side effect (a Pause between binding
+        // and here must deny the launch).
+        if (!bound.allows()) return
         BotStatus.action("Relaunching Brawl Stars (foreground was $fg)")
-        if (GameLauncher.launch(appContext, gamePackage)) lastGameLaunchMs = now
+        if (bound.allows() && GameLauncher.launch(appContext, gamePackage)) lastGameLaunchMs = now
     }
 
     private fun mainLoop() {
@@ -438,6 +583,7 @@ class BotEngine(
         var seenRealState = false
         var loggedWaitingForLoad = false
         while (!stopRequested.get()) {
+            if (instance !== this) return
             if (paused.get()) {
                 try { Thread.sleep(100) } catch (_: InterruptedException) {}
                 continue
@@ -454,13 +600,16 @@ class BotEngine(
                 continue
             }
             loggedWaitingForGame = false
+            val iteration = sessionAuthority.beginRequest() ?: return
+            val observationRevision = synchronized(stateLock) { stateRevision }
             val iterationStartNs = System.nanoTime()
             try {
                 val frame = windowController.screenshot()
+                if (!iteration.allows()) continue
                 DiagnosticLog.sample("capture.frame", "age_ms=${frame.ageMs()} size=${frame.width}x${frame.height}")
                 if (firstFrame) {
                     firstFrame = false; startTimeMs = System.currentTimeMillis()
-                    BotStatus.captureSize = "${frame.width}x${frame.height}"
+                    if (instance === this) BotStatus.captureSize = "${frame.width}x${frame.height}"
                     PylaLog.p(TAG, "main loop first screenshot: ${frame.width}x${frame.height} ratios=(${"%.2f".format(windowController.widthRatio)}, ${"%.2f".format(windowController.heightRatio)}) scale=${"%.2f".format(windowController.scaleFactor)}")
                 }
 
@@ -469,12 +618,12 @@ class BotEngine(
                 if (state != "match" && state != "unknown") {
                     val currentMat = PylaUtils.frameToMat(frame)
                     val observedNow = try { StateFinder.getState(currentMat) } finally { currentMat.release() }
-                    state = observeState(observedNow, frame.capturedAtMs) ?: "unknown"
+                    state = observeState(observedNow, frame.capturedAtMs, expectedRevision = observationRevision) ?: "unknown"
                 }
                 if (state != "match" && state != "unknown" &&
                     SystemClock.elapsedRealtime() - latestObservationAtMs > 3_000L) {
                     windowController.releaseMovement()
-                    BotStatus.publish(RuntimeState.UNKNOWN, VerificationPhase.VERIFY_STATE, false)
+                    if (instance === this) BotStatus.publish(RuntimeState.UNKNOWN, VerificationPhase.VERIFY_STATE, false)
                     Thread.sleep(100)
                     continue
                 }
@@ -526,6 +675,11 @@ class BotEngine(
                     stop(); return
                 }
 
+                // Re-check ownership/flags AFTER capture and long processing and BEFORE entering the
+                // stage/play authority: a stale iteration captured before a Pause must not issue
+                // fresh navigation or combat authority now.
+                if (!iteration.allows()) continue
+
                 if (state == "match" || state == "unknown") {
                     val brawler = stageManager.brawlersPickData.firstOrNull()?.get("brawler")?.toString()
                     if (brawler == null) { Thread.sleep(50); continue }
@@ -553,14 +707,14 @@ class BotEngine(
                 }
             } catch (t: Throwable) {
                 if (t is BrawlerSelectionFailedException) {
-                    BotStatus.error("Brawler selection could not be verified. Bot stopped; check the selection and press START again.")
+                    if (instance === this) BotStatus.error("Brawler selection could not be verified. Bot stopped; check the selection and press START again.")
                     PylaLog.w(TAG, "Unverified brawler selection (${t.reason}); refusing to start a match")
                     stop()
                     return
                 }
                 if (t is IllegalStateException && t.message?.contains("push targets reached") == true) {
                     PylaLog.p(TAG, "All brawler push targets reached, stopping the bot")
-                    BotStatus.error("All brawler push targets reached, bot stopped")
+                    if (instance === this) BotStatus.error("All brawler push targets reached, bot stopped")
                     stop()
                     return
                 }
@@ -569,7 +723,7 @@ class BotEngine(
                 try { windowController.releaseMovement() } catch (_: Throwable) {}
                 play.gameplayEvidence.reset()
                 stateAuthority.invalidate(SystemClock.elapsedRealtime())
-                BotStatus.publish(RuntimeState.UNKNOWN, VerificationPhase.VERIFY_STATE, false)
+                if (instance === this) BotStatus.publish(RuntimeState.UNKNOWN, VerificationPhase.VERIFY_STATE, false)
                 PylaLog.e(TAG, "main loop error: ${t.message}", t)
                 try { Thread.sleep(50) } catch (_: InterruptedException) {}
             }

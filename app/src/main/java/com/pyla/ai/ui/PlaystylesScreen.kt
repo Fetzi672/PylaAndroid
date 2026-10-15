@@ -1,6 +1,5 @@
 package com.pyla.ai.ui
 
-import android.content.Context
 import android.net.Uri
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
@@ -56,6 +55,7 @@ import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.pyla.ai.config.PlaystyleSelection
 import com.pyla.ai.engine.BotEngine
 import com.pyla.ai.pyla.PlaystyleRegistry
 
@@ -67,9 +67,8 @@ fun PlaystylesScreen(
     onQueueChanged: () -> Unit,
 ) {
     val context = LocalContext.current
-    val prefs = remember { context.getSharedPreferences("pyla", Context.MODE_PRIVATE) }
     var selectedPlaystyle by remember {
-        mutableStateOf(prefs.getString("playstyle", PlaystyleRegistry.DEFAULT_PLAYSTYLE) ?: PlaystyleRegistry.DEFAULT_PLAYSTYLE)
+        mutableStateOf(PlaystyleSelection.effectivePlaystyle())
     }
     var refresh by remember { mutableStateOf(0) }
     val playstyles = remember(assetsReady, refresh) {
@@ -86,8 +85,7 @@ fun PlaystylesScreen(
                 if (content != null) {
                     val stored = PlaystyleRegistry.importContent(name, content)
                     if (stored != null) {
-                        selectedPlaystyle = stored
-                        prefs.edit().putString("playstyle", stored).apply()
+                        selectedPlaystyle = PlaystyleSelection.select(stored)
                         refresh++
                     }
                 }
@@ -120,8 +118,7 @@ fun PlaystylesScreen(
                         selected = selected,
                         enabled = !running,
                         onClick = {
-                            selectedPlaystyle = style.filename
-                            prefs.edit().putString("playstyle", style.filename).apply()
+                            selectedPlaystyle = PlaystyleSelection.select(style.filename)
                         },
                         colors = RadioButtonDefaults.colors(selectedColor = PylaColors.Purple),
                     )
@@ -145,10 +142,7 @@ fun PlaystylesScreen(
                             contentPadding = PaddingValues(horizontal = 6.dp, vertical = 0.dp),
                             onClick = {
                                 PlaystyleRegistry.delete(style.filename)
-                                if (selectedPlaystyle == style.filename) {
-                                    selectedPlaystyle = PlaystyleRegistry.DEFAULT_PLAYSTYLE
-                                    prefs.edit().putString("playstyle", selectedPlaystyle).apply()
-                                }
+                                selectedPlaystyle = PlaystyleSelection.onPlaystyleDeleted(style.filename)
                                 refresh++
                             },
                         ) { Icon(Icons.Default.Delete, null, tint = PylaColors.Red, modifier = Modifier.size(16.dp)) }

@@ -304,9 +304,40 @@ class Play(
     fun attack(touchUp: Boolean = true, touchDown: Boolean = true) {
         windowController.press("attack", touchUp = touchUp, touchDown = touchDown)
     }
-    fun useSuper() { Log.i(TAG, "Using super"); windowController.press("super"); timeSinceSuperChecked = nowSec(); isSuperReady = false }
-    fun useGadget() { Log.i(TAG, "Using gadget"); windowController.press("gadget"); timeSinceGadgetChecked = nowSec(); isGadgetReady = false }
-    fun useHypercharge() { Log.i(TAG, "Using hypercharge"); windowController.press("hypercharge"); timeSinceHyperchargeChecked = nowSec(); isHyperchargeReady = false }
+    @Synchronized fun useSuper() {
+        if (!issueSpecialAbility("super")) return
+        Log.i(TAG, "Using super"); timeSinceSuperChecked = nowSec(); isSuperReady = false
+    }
+    @Synchronized fun useGadget() {
+        if (!issueSpecialAbility("gadget")) return
+        Log.i(TAG, "Using gadget"); timeSinceGadgetChecked = nowSec(); isGadgetReady = false
+    }
+    @Synchronized fun useHypercharge() {
+        if (!issueSpecialAbility("hypercharge")) return
+        Log.i(TAG, "Using hypercharge"); timeSinceHyperchargeChecked = nowSec(); isHyperchargeReady = false
+    }
+
+    /** Carry the original finite frame and combat generation through native queue dispatch. */
+    private fun issueSpecialAbility(key: String): Boolean {
+        if (!combatTargetCurrent()) return false
+        val generation = combatGeneration
+        val superCue = if (key == "super") superEvidence else null
+        val capturedAtMs = if (superCue != null) minOf(activeGameplayFrameMs, superCue.capturedAtMs) else activeGameplayFrameMs
+        val issuingThread = Thread.currentThread()
+        val combatGuard = attackCommandGuard(generation, capturedAtMs, finite = true, thread = issuingThread)
+        val guard = {
+            combatGuard() && activeGameplayTarget && (superCue == null ||
+                (InputCoordinates.geometryGeneration == superCue.geometry && superEvidence?.let {
+                    it.geometry == superCue.geometry && kotlin.math.abs(it.point.x-superCue.point.x)<3f &&
+                        kotlin.math.abs(it.point.y-superCue.point.y)<3f
+                } == true))
+        }
+        if (!guard()) return false
+        if (superCue != null) windowController.pressCombatAt(superCue.point.x, superCue.point.y, guard)
+        else windowController.press(key, guard = guard)
+        DiagnosticLog.event("combat.special_request", "ability=$key visual=${superCue != null}")
+        return true
+    }
 
     fun isPathBlocked(
         playerBox: FloatArray?,
@@ -460,13 +491,15 @@ class Play(
     private fun pixelAreaScale(): Double =
         (windowController.widthRatio.toDouble() * windowController.heightRatio.toDouble()).coerceAtLeast(0.01)
 
-    fun checkIfSuperReady(frame: Mat): Boolean {
-        val crop = abilityCrop(frame, superCropArea) ?: return false
-        val n = PylaUtils.countHsvPixels(crop, doubleArrayOf(17.0, 170.0, 200.0), doubleArrayOf(27.0, 255.0, 255.0))
-        crop.release()
-        val min = superPixelsMin * pixelAreaScale()
-        if (verboseDebug) Log.i(TAG, "super yellow=$n (min=${min.toInt()})")
-        return n > min
+    private data class SuperEvidence(val point: PhoneVisualCues.SuperPoint, val capturedAtMs: Long, val geometry: Long)
+    @Volatile private var superEvidence: SuperEvidence? = null
+    fun checkIfSuperReady(frame: Mat, capturedAtMs: Long = 0L): Boolean {
+        val geometry = InputCoordinates.geometryGeneration
+        val point = PhoneVisualCues.superReady(frame)
+        superEvidence = if (point != null && geometry == InputCoordinates.geometryGeneration)
+            SuperEvidence(point, capturedAtMs, geometry) else null
+        DiagnosticLog.sample("combat.super_readiness", "ready=${point != null} visual=true")
+        return point != null
     }
 
     fun checkIfGadgetReady(frame: Mat): Boolean {
@@ -580,16 +613,9 @@ class Play(
         }
         this.frame = frame
         val currentTime = nowSec()
+        val detectStarted = monotonicNowMs()
         var data: MutableMap<String, MutableList<FloatArray>> = getMainData(frame)
-        if (currentTime - timeSinceWallsChecked > wallsTresholdSec) {
-            val td = getTileData(frame, data["player"])
-            val (walls, bushes) = processTileData(td)
-            timeSinceWallsChecked = currentTime
-            lastWallsData = walls; lastBushesData = bushes
-            data["wall"] = walls.toMutableList(); data["bush"] = bushes.toMutableList()
-        } else {
-            data["wall"] = lastWallsData.toMutableList(); data["bush"] = lastBushesData.toMutableList()
-        }
+        DiagnosticLog.sample("gameplay.pipeline", "detect_ms=${monotonicNowMs()-detectStarted}")
 
         // Observe raw detections before the missing-player path discards them.
         DiagnosticLog.event("detection.player_presence", "present=${!data["player"].isNullOrEmpty()}")
@@ -639,6 +665,19 @@ class Play(
             return
         }
 
+        // Denied/loading frames need no wall inference. Admitted planning still uses current walls.
+        val wallsStarted = monotonicNowMs()
+        if (currentTime - timeSinceWallsChecked > wallsTresholdSec) {
+            val td = getTileData(frame, data["player"])
+            val (walls, bushes) = processTileData(td)
+            timeSinceWallsChecked = currentTime
+            lastWallsData = walls; lastBushesData = bushes
+            data["wall"] = walls.toMutableList(); data["bush"] = bushes.toMutableList()
+        } else {
+            data["wall"] = lastWallsData.toMutableList(); data["bush"] = lastBushesData.toMutableList()
+        }
+        DiagnosticLog.sample("gameplay.walls", "duration_ms=${monotonicNowMs()-wallsStarted}")
+
         if (currentTime - timeSinceHyperchargeChecked > hyperchargeTresholdSec) {
             isHyperchargeReady = checkIfHyperchargeReady(frame)
             timeSinceHyperchargeChecked = currentTime
@@ -648,7 +687,7 @@ class Play(
             timeSinceGadgetChecked = currentTime
         }
         if (currentTime - timeSinceSuperChecked > superTresholdSec) {
-            isSuperReady = checkIfSuperReady(frame)
+            isSuperReady = checkIfSuperReady(frame, capturedAtMs)
             timeSinceSuperChecked = currentTime
         }
 
@@ -750,6 +789,7 @@ class Play(
      * usable for the next admitted frame.
      */
     @Synchronized fun resetCombat() {
+        superEvidence = null
         basicAttackEligible = false
         activeGameplayFrameMs = 0L
         activeGameplayTarget = false

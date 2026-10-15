@@ -244,8 +244,15 @@ object StateFinder {
     }
 
     fun getState(screenshot: Mat): String {
+        val result = classifyState(screenshot)
+        if (result != "unknown" && !result.startsWith("star_drop_")) PhoneVisualCues.revokeChaosContinuation()
+        return result
+    }
+
+    private fun classifyState(screenshot: Mat): String {
         findGameResult(screenshot)?.let { PylaLog.p(TAG, "State: end_$it (${screenshot.cols()}x${screenshot.rows()})"); return "end_$it" }
         videoScreenState(screenshot)?.let { return it }
+        if (PhoneVisualCues.isChaosDrop(screenshot)) return "star_drop_regular"
         if (inNanoNoodles(screenshot)) { PylaLog.p(TAG, "State: nano_noodles"); return "nano_noodles" }
         inStarDrop(screenshot)?.let { PylaLog.p(TAG, "State: star_drop_$it"); return "star_drop_$it" }
         if (inTrophyReward(screenshot)) { PylaLog.p(TAG, "State: trophy_reward"); return "trophy_reward" }
