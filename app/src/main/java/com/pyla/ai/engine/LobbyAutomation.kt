@@ -69,7 +69,18 @@ class LobbyAutomation(
     private fun centerX(base: Int, frameWidth: Int, hr: Float): Float =
         frameWidth / 2f + (base - 960) * hr
 
-    fun checkForIdle(frame: Mat) {
+    /**
+     * Idle reconnect tap.
+     *
+     * [guard] is the caller's fail-closed lifecycle authority for this single reconnect: the caller
+     * binds it to the session epoch and to the current frame (foreground, freshness, current-screen
+     * evidence) and it is carried to the non-replayable navigation queue. The tap is routed through
+     * [WindowController.guardedNavigationTap] — never a bare [WindowController.click] — so a
+     * revoked guard denies the tap at the queue dispatch point as well as here. The default denies,
+     * so an unconfigured caller cannot inject input. HSV window, crop, reconnect coordinates and the
+     * 40 ms hold are unchanged from the PC parity path.
+     */
+    fun checkForIdle(frame: Mat, guard: () -> Boolean = EngineSessionAuthority.DENY) {
         val hr = windowController.heightRatio
         if (hr <= 0f) return
         val w = frame.cols(); val h = frame.rows()
@@ -89,9 +100,13 @@ class LobbyAutomation(
             val btn = buttonsConfig().getIntArray("idle_reconnect")
             val bx = if (btn.size >= 2) btn[0] else 540
             val by = if (btn.size >= 2) btn[1] else 630
-            Log.i(TAG, "Idle detected (gray=$gray), clicking reconnect at ($bx,$by)")
-            BotStatus.action("Idle popup detected, clicking to reconnect")
-            windowController.click(centerX(bx, w, hr), by * hr)
+            // Re-evaluate the caller's authority immediately before the side effect. The same guard
+            // is retained through the queued dispatch, so a revocation between here and dispatch
+            // also denies the tap.
+            if (!guard()) return
+            Log.i(TAG, "Idle detected (gray=$gray), reconnecting at ($bx,$by)")
+            BotStatus.action("Idle popup detected, reconnecting")
+            windowController.guardedNavigationTap(centerX(bx, w, hr), by * hr, guard)
         }
     }
 
@@ -363,8 +378,9 @@ class LobbyAutomation(
     }
 
     private fun stateOf(frame: FrameSnapshot): String {
+        val chaosGeneration = PhoneVisualCues.chaosObservationGeneration()
         val mat = PylaUtils.frameToMat(frame)
-        return try { StateFinder.getState(mat) } finally { mat.release() }
+        return try { StateFinder.getState(mat, chaosGeneration, frame.capturedAtMs) } finally { mat.release() }
     }
 
     private enum class ScanRegion { GRID, DETAIL, LOBBY }

@@ -1,6 +1,5 @@
 package com.pyla.ai.ui
 
-import android.content.Context
 import android.net.Uri
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
@@ -56,6 +55,7 @@ import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.pyla.ai.config.PlaystyleSelection
 import com.pyla.ai.engine.BotEngine
 import com.pyla.ai.pyla.PlaystyleRegistry
 
@@ -67,10 +67,14 @@ fun PlaystylesScreen(
     onQueueChanged: () -> Unit,
 ) {
     val context = LocalContext.current
-    val prefs = remember { context.getSharedPreferences("pyla", Context.MODE_PRIVATE) }
-    var selectedPlaystyle by remember {
-        mutableStateOf(prefs.getString("playstyle", PlaystyleRegistry.DEFAULT_PLAYSTYLE) ?: PlaystyleRegistry.DEFAULT_PLAYSTYLE)
+    var selectedPlaystyle by remember(assetsReady) {
+        mutableStateOf<String?>(null)
     }
+    LaunchedEffect(assetsReady) {
+        selectedPlaystyle = loadPlaystyleSelection(assetsReady)
+    }
+    // Do not allow a user choice to race the initial asynchronous resolution.
+    val selectionReady = assetsReady && selectedPlaystyle != null
     var refresh by remember { mutableStateOf(0) }
     val playstyles = remember(assetsReady, refresh) {
         if (assetsReady) PlaystyleRegistry.listMeta() else emptyList()
@@ -86,8 +90,7 @@ fun PlaystylesScreen(
                 if (content != null) {
                     val stored = PlaystyleRegistry.importContent(name, content)
                     if (stored != null) {
-                        selectedPlaystyle = stored
-                        prefs.edit().putString("playstyle", stored).apply()
+                        selectedPlaystyle = PlaystyleSelection.select(stored)
                         refresh++
                     }
                 }
@@ -118,10 +121,9 @@ fun PlaystylesScreen(
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     RadioButton(
                         selected = selected,
-                        enabled = !running,
+                        enabled = selectionReady && !running,
                         onClick = {
-                            selectedPlaystyle = style.filename
-                            prefs.edit().putString("playstyle", style.filename).apply()
+                            selectedPlaystyle = PlaystyleSelection.select(style.filename)
                         },
                         colors = RadioButtonDefaults.colors(selectedColor = PylaColors.Purple),
                     )
@@ -140,15 +142,12 @@ fun PlaystylesScreen(
                             color = PylaColors.TextLow, fontSize = 11.sp,
                         )
                     }
-                    if (!running && style.filename !in bundled) {
+                    if (selectionReady && !running && style.filename !in bundled) {
                         TextButton(
                             contentPadding = PaddingValues(horizontal = 6.dp, vertical = 0.dp),
                             onClick = {
                                 PlaystyleRegistry.delete(style.filename)
-                                if (selectedPlaystyle == style.filename) {
-                                    selectedPlaystyle = PlaystyleRegistry.DEFAULT_PLAYSTYLE
-                                    prefs.edit().putString("playstyle", selectedPlaystyle).apply()
-                                }
+                                selectedPlaystyle = PlaystyleSelection.onPlaystyleDeleted(style.filename)
                                 refresh++
                             },
                         ) { Icon(Icons.Default.Delete, null, tint = PylaColors.Red, modifier = Modifier.size(16.dp)) }
@@ -160,7 +159,7 @@ fun PlaystylesScreen(
                 label = "Import custom .pyla",
                 icon = Icons.Default.Upload,
                 accent = PylaColors.Teal,
-                enabled = assetsReady && !running,
+                enabled = selectionReady && !running,
                 onClick = { importLauncher.launch(arrayOf("*/*")) },
                 modifier = Modifier.fillMaxWidth(),
             )

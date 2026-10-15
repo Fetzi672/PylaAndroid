@@ -5,6 +5,7 @@ perceived_tile_size = 54
 wall_model_classes = [ "wall", "bush", "close_bush",]
 gadget_pixels_minimum = 1300.0
 hypercharge_pixels_minimum = 1800.0
+# Legacy scale, read-time migration: 1800 = 25% localized yellow coverage; higher is stricter.
 super_pixels_minimum = 1800.0
 idle_pixels_minimum = 75000.0
 centered_wall_detection = false

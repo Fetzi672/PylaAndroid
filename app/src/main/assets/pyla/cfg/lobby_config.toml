@@ -12,6 +12,8 @@ prestige_continue = [535, 950, 345, 95]
 nano_noodles = [360, 880, 215, 150]
 match_result = [20, 10, 650, 200]
 [pixel_counter_crop_area]
+# This exact historical factory value uses automatic Super template localization.
+# Any other valid rectangle is a hard search region in legacy 1920x1080 coordinates.
 super=[1460, 830, 1560, 930]
 gadget=[1580, 930, 1700, 1050]
 hypercharge=[1350, 940, 1450, 1050]

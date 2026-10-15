@@ -70,7 +70,7 @@ private val allSettings = listOf(
     SettingDef("Ability Detection", PylaColors.Orange, "bot_config", listOf(
         SettingItem("gadget_pixels_minimum", "Gadget pixel threshold", "", SettingType.Double),
         SettingItem("hypercharge_pixels_minimum", "Hypercharge pixel threshold", "", SettingType.Double),
-        SettingItem("super_pixels_minimum", "Super pixel threshold", "", SettingType.Double),
+        SettingItem("super_pixels_minimum", "Super readiness threshold", "Legacy units: 1800 = 25% yellow coverage; higher is stricter", SettingType.Double),
         SettingItem("idle_pixels_minimum", "Idle pixel threshold", "", SettingType.Double),
     )),
     SettingDef("Time Thresholds", PylaColors.Teal, "time_tresholds", listOf(
