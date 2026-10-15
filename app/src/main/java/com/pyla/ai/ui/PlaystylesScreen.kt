@@ -67,9 +67,14 @@ fun PlaystylesScreen(
     onQueueChanged: () -> Unit,
 ) {
     val context = LocalContext.current
-    var selectedPlaystyle by remember {
-        mutableStateOf(PlaystyleSelection.effectivePlaystyle())
+    var selectedPlaystyle by remember(assetsReady) {
+        mutableStateOf<String?>(null)
     }
+    LaunchedEffect(assetsReady) {
+        selectedPlaystyle = loadPlaystyleSelection(assetsReady)
+    }
+    // Do not allow a user choice to race the initial asynchronous resolution.
+    val selectionReady = assetsReady && selectedPlaystyle != null
     var refresh by remember { mutableStateOf(0) }
     val playstyles = remember(assetsReady, refresh) {
         if (assetsReady) PlaystyleRegistry.listMeta() else emptyList()
@@ -116,7 +121,7 @@ fun PlaystylesScreen(
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     RadioButton(
                         selected = selected,
-                        enabled = !running,
+                        enabled = selectionReady && !running,
                         onClick = {
                             selectedPlaystyle = PlaystyleSelection.select(style.filename)
                         },
@@ -137,7 +142,7 @@ fun PlaystylesScreen(
                             color = PylaColors.TextLow, fontSize = 11.sp,
                         )
                     }
-                    if (!running && style.filename !in bundled) {
+                    if (selectionReady && !running && style.filename !in bundled) {
                         TextButton(
                             contentPadding = PaddingValues(horizontal = 6.dp, vertical = 0.dp),
                             onClick = {
@@ -154,7 +159,7 @@ fun PlaystylesScreen(
                 label = "Import custom .pyla",
                 icon = Icons.Default.Upload,
                 accent = PylaColors.Teal,
-                enabled = assetsReady && !running,
+                enabled = selectionReady && !running,
                 onClick = { importLauncher.launch(arrayOf("*/*")) },
                 modifier = Modifier.fillMaxWidth(),
             )
