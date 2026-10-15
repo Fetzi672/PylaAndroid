@@ -12,7 +12,7 @@ Everything here is early beta. Treat every run as supervised. The project does n
 ## License and attribution
 
 - Original attribution and the upstream project link are preserved.
-- The project is now licensed under the **CC BY-NC 4.0** [CC BY-NC 4.0](https://creativecommons.org/licenses/by-nc/4.0/)
+- The project is licensed under the **CC BY-NC 4.0** [CC BY-NC 4.0](https://creativecommons.org/licenses/by-nc/4.0/)
 
 ## What works today
 
