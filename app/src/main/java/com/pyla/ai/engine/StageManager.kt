@@ -329,8 +329,10 @@ class StageManager(
     }
 
     private fun currentStateFromScreen(): String {
-        val mat = PylaUtils.frameToMat(windowController.screenshot())
-        return try { StateFinder.getState(mat) } finally { mat.release() }
+        val chaosGeneration = PhoneVisualCues.chaosObservationGeneration()
+        val captured = windowController.screenshot()
+        val mat = PylaUtils.frameToMat(captured)
+        return try { StateFinder.getState(mat, chaosGeneration, captured.capturedAtMs) } finally { mat.release() }
     }
 
     private fun endGame(invocation: Invocation, stateName: String) {
@@ -412,9 +414,10 @@ class StageManager(
         } else {
             repeat(8) {
                 if (!invocation.isLive) return
+                val chaosGeneration = PhoneVisualCues.chaosObservationGeneration()
                 val captured = windowController.screenshot()
                 val actual = PylaUtils.frameToMat(captured)
-                val observed = try { StateFinder.getState(actual) } finally { actual.release() }
+                val observed = try { StateFinder.getState(actual, chaosGeneration, captured.capturedAtMs) } finally { actual.release() }
                 DiagnosticLog.sample("navigation.reward_image", "expected=$state observed=$observed")
                 if (observed != state) {
                     // A newer image overrules the slower cached state, including already queued taps.

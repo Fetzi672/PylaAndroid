@@ -204,6 +204,10 @@ class BotEngine(
             PylaLog.w(TAG, "start() ignored: engine ownership is unavailable")
             return
         }
+        // Session replacement: a new run must not inherit the previous run's Chaosdrop evidence.
+        synchronized(sessionOwnershipLock) {
+            if (instance === this) PhoneVisualCues.revokeChaosContinuation()
+        }
         fullySettled.set(false)
         stateWorkerStarted = false
         mainWorkerSettled.set(false)
@@ -358,6 +362,11 @@ class BotEngine(
         // until full settlement guarantees that here.
         val owner = instance === this
         if (owner && firstStop) {
+            // Stop invalidates the Chaosdrop continuation evidence. Owner-gated: a stale stop must
+            // not poison a newer session's own evidence.
+            synchronized(sessionOwnershipLock) {
+                if (instance === this) PhoneVisualCues.revokeChaosContinuation()
+            }
             try { if (::play.isInitialized) play.revokeCombat() } catch (_: Throwable) {}
             try { if (::windowController.isInitialized) windowController.releaseMovement() } catch (_: Throwable) {}
         }
@@ -424,6 +433,12 @@ class BotEngine(
         }
         if (::stageManager.isInitialized) stageManager.invalidateNavigation()
         if (instance === this) {
+            // Pause AND Resume invalidate the Chaosdrop continuation: evidence observed before an
+            // unsampled Pause->Resume pair must not authorise a coins dismissal afterwards.
+            // Owner-gated so a stale instance cannot poison a newer session's own evidence.
+            synchronized(sessionOwnershipLock) {
+                if (instance === this) PhoneVisualCues.revokeChaosContinuation()
+            }
             if (p && ::play.isInitialized) play.resetCombat()
             if (p && ::windowController.isInitialized) windowController.releaseMovement()
             BotStatus.enginePaused = p && BotStatus.engineRunning
@@ -473,6 +488,10 @@ class BotEngine(
                 } else if (gameInFront && now - lastStateCheckMs >=
                     if (latestState == null || latestState == "unknown") minOf(stateCheckIntervalMs, 500L) else stateCheckIntervalMs) {
                     loggedNoCapture = false
+                    // Bind this observation to the lifecycle generation captured BEFORE the frame:
+                    // an in-flight classification that straddled a Pause/Stop/session replacement
+                    // can neither arm nor continue the Chaosdrop coins dismissal.
+                    val chaosGeneration = PhoneVisualCues.chaosObservationGeneration()
                     val copied = capture.copyLatestFrame(stateFrameBuffer)
                     if (copied != null &&
                         SystemClock.elapsedRealtime() - copied.capturedAtMs <= WindowController.FRAME_STALE_TIMEOUT_MS
@@ -481,7 +500,7 @@ class BotEngine(
                         lastStateCheckMs = now
                         if (!loggedFirstFrame) { PylaLog.p(TAG, "state checker received first frame ${copied.width}x${copied.height}"); loggedFirstFrame = true }
                         val mat = PylaUtils.argbToRgbMat(copied.rgbBuffer, copied.width, copied.height)
-                        val observed = StateFinder.getState(mat)
+                        val observed = StateFinder.getState(mat, chaosGeneration, copied.capturedAtMs)
                         // Snapshot the *previous* admitted evidence before this frame can overwrite
                         // it. The recovery below is about a match that was positively admitted and
                         // has since stopped producing detections, so it must be judged on what was
@@ -604,6 +623,9 @@ class BotEngine(
             val observationRevision = synchronized(stateLock) { stateRevision }
             val iterationStartNs = System.nanoTime()
             try {
+                // Captured BEFORE the screenshot so a classification that straddled a Pause/Stop is
+                // bound to (and rejected by) the superseded Chaosdrop lifecycle generation.
+                val chaosGeneration = PhoneVisualCues.chaosObservationGeneration()
                 val frame = windowController.screenshot()
                 if (!iteration.allows()) continue
                 DiagnosticLog.sample("capture.frame", "age_ms=${frame.ageMs()} size=${frame.width}x${frame.height}")
@@ -617,7 +639,7 @@ class BotEngine(
                 if (state == null) { Thread.sleep(50); continue }
                 if (state != "match" && state != "unknown") {
                     val currentMat = PylaUtils.frameToMat(frame)
-                    val observedNow = try { StateFinder.getState(currentMat) } finally { currentMat.release() }
+                    val observedNow = try { StateFinder.getState(currentMat, chaosGeneration, frame.capturedAtMs) } finally { currentMat.release() }
                     state = observeState(observedNow, frame.capturedAtMs, expectedRevision = observationRevision) ?: "unknown"
                 }
                 if (state != "match" && state != "unknown" &&

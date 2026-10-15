@@ -10,10 +10,19 @@ import org.opencv.imgproc.Imgproc
 object PhoneVisualCues {
     data class SuperPoint(val x: Float, val y: Float)
     private val templates = HashMap<String, Mat>()
-    private var chaosAt = 0L
-    private var chaosSize = 0L
+    private val chaosGate = ChaosContinuationGate()
     private fun size(image: Mat) = (image.cols().toLong() shl 32) or image.rows().toLong()
-    @Synchronized fun revokeChaosContinuation() { chaosAt = 0L; chaosSize = 0L }
+
+    /**
+     * Lifecycle generation to capture BEFORE a frame whose observation may arm the coins
+     * continuation. It is threaded through the classifier so an observation that straddled a
+     * Pause/Stop/session replacement can neither arm the continuation nor continue the dismissal.
+     */
+    fun chaosObservationGeneration(): Long = chaosGate.observationGeneration()
+
+    @Synchronized fun revokeChaosContinuation(expectedGeneration: Long? = null) {
+        chaosGate.invalidate(SystemClock.elapsedRealtime(), expectedGeneration)
+    }
 
     private fun template(name: String, h: Int): Mat? {
         val key = "$name:$h"
@@ -32,12 +41,16 @@ object PhoneVisualCues {
     }
     private data class Match(val score: Double, val x: Double, val y: Double)
     private fun match(gray: Mat, name: String, x0: Double, y0: Double, x1: Double, y1: Double): Match? {
-        val t = template(name, gray.rows()) ?: return null
         val scale = gray.rows() / 720.0
         val left = (x0 * scale).toInt().coerceIn(0, gray.cols())
         val right = (x1 * scale).toInt().coerceIn(0, gray.cols())
         val top = (y0 * scale).toInt().coerceIn(0, gray.rows())
         val bottom = (y1 * scale).toInt().coerceIn(0, gray.rows())
+        return match(gray, name, SuperReadinessPolicy.Bounds(left, top, right, bottom))
+    }
+    private fun match(gray: Mat, name: String, bounds: SuperReadinessPolicy.Bounds): Match? {
+        val t = template(name, gray.rows()) ?: return null
+        val (left, top, right, bottom) = bounds
         if (right-left < t.cols() || bottom-top < t.rows()) return null
         val crop = Mat(gray, Rect(left,top,right-left,bottom-top)); val scores = Mat()
         return try {
@@ -46,13 +59,14 @@ object PhoneVisualCues {
             if (!m.maxVal.isFinite()) null else Match(m.maxVal,left+m.maxLoc.x+t.cols()/2.0,top+m.maxLoc.y+t.rows()/2.0)
         } finally { scores.release(); crop.release() }
     }
-    @Synchronized fun superReady(image: Mat): SuperPoint? {
+    @Synchronized fun superReady(image: Mat, policy: SuperReadinessPolicy? = SuperReadinessPolicy.defaults()): SuperPoint? {
         if (image.empty() || image.channels()!=3) return null
+        val bounds = policy?.searchBounds(image.cols(), image.rows()) ?: return null
         val gray=Mat(); Imgproc.cvtColor(image,gray,Imgproc.COLOR_RGB2GRAY)
-        val s=image.rows()/720.0; val refW=image.cols()/s
+        val s=image.rows()/720.0
         val m=try {
             listOf("super_ready_skull", "super_ready_skull_active", "super_ready_skull_pulse")
-                .mapNotNull { match(gray,it,refW-624.0,288.0,refW-10.0,710.0) }.maxByOrNull { it.score }
+                .mapNotNull { match(gray,it,bounds) }.maxByOrNull { it.score }
         } finally { gray.release() }
         if (m==null || m.score<=0.90) return null
         val radius=44.0*s;val x0=(m.x-radius).toInt();val y0=(m.y-radius).toInt();val x1=(m.x+radius).toInt();val y1=(m.y+radius).toInt()
@@ -61,19 +75,25 @@ object PhoneVisualCues {
         return try {
             Imgproc.cvtColor(roi,hsv,Imgproc.COLOR_RGB2HSV)
             Core.inRange(hsv,Scalar(17.0,170.0,200.0),Scalar(34.0,255.0,255.0),mask)
-            if (Core.countNonZero(mask).toDouble()/mask.total()>0.25) SuperPoint(m.x.toFloat(),m.y.toFloat()) else null
+            if (policy.acceptsYellow(Core.countNonZero(mask).toLong(), mask.total())) SuperPoint(m.x.toFloat(),m.y.toFloat()) else null
         } finally { mask.release();hsv.release();roi.release() }
     }
     /** Coins dismissal is admitted only immediately after positively observed Chaosdrop artwork. */
-    @Synchronized fun isChaosDrop(image: Mat, nowMs: Long = SystemClock.elapsedRealtime()): Boolean {
+    @Synchronized fun isChaosDrop(
+        image: Mat,
+        nowMs: Long = SystemClock.elapsedRealtime(),
+        chaosGeneration: Long? = chaosGate.observationGeneration(),
+        capturedAtMs: Long = nowMs,
+    ): Boolean {
         if (image.empty() || image.channels()!=3) return false
         val gray=Mat();Imgproc.cvtColor(image,gray,Imgproc.COLOR_RGB2GRAY)
         val s=image.rows()/720.0;val center=image.cols()/s/2.0
         return try {
             val header=match(gray,"chaos_daily_wins",0.0,0.0,600.0,140.0)?.score ?: 0.0
             val face=if(header>0.90) listOf("rare","super_rare","epic").maxOf { match(gray,"chaos_face_$it",center-280.0,220.0,center+300.0,600.0)?.score ?: 0.0 } else 0.0
-            if(header>0.90 && face>0.86) { chaosAt=nowMs;chaosSize=size(image);true }
-            else if(chaosAt>0 && nowMs>=chaosAt && nowMs-chaosAt<=5_000 && chaosSize==size(image)) {
+            // Unbound read-only classifiers may identify artwork, but cannot create a chain.
+            if(header>0.90 && face>0.86) chaosGeneration == null || chaosGate.arm(chaosGeneration, nowMs, size(image), capturedAtMs)
+            else if(chaosGeneration != null && chaosGate.continues(chaosGeneration, nowMs, size(image), capturedAtMs)) {
                 val title=match(gray,"chaos_reward_coins_title",center-330.0,30.0,center+340.0,210.0)?.score ?: 0.0
                 val coin=match(gray,"chaos_reward_coin_icon",center-260.0,330.0,center+160.0,600.0)?.score ?: 0.0
                 title>0.90 && coin>0.90

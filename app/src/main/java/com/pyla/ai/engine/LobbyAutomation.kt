@@ -378,8 +378,9 @@ class LobbyAutomation(
     }
 
     private fun stateOf(frame: FrameSnapshot): String {
+        val chaosGeneration = PhoneVisualCues.chaosObservationGeneration()
         val mat = PylaUtils.frameToMat(frame)
-        return try { StateFinder.getState(mat) } finally { mat.release() }
+        return try { StateFinder.getState(mat, chaosGeneration, frame.capturedAtMs) } finally { mat.release() }
     }
 
     private enum class ScanRegion { GRID, DETAIL, LOBBY }

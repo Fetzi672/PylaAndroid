@@ -63,7 +63,7 @@ class Play(
     private fun timeConfig(): TomlLite = PylaConfig.load("cfg/time_tresholds.toml")
     private fun lobbyConfig(): TomlLite = PylaConfig.load("cfg/lobby_config.toml")
 
-    private val superCropArea: List<Int> get() = lobbyConfig().getIntArray("pixel_counter_crop_area.super")
+
     private val gadgetCropArea: List<Int> get() = lobbyConfig().getIntArray("pixel_counter_crop_area.gadget")
     private val hyperchargeCropArea: List<Int> get() = lobbyConfig().getIntArray("pixel_counter_crop_area.hypercharge")
 
@@ -91,7 +91,7 @@ class Play(
 
     private val gadgetPixelsMin: Long get() = botConfig().getDouble("gadget_pixels_minimum", 1300.0).toLong()
     private val hyperchargePixelsMin: Long get() = botConfig().getDouble("hypercharge_pixels_minimum", 1800.0).toLong()
-    private val superPixelsMin: Long get() = botConfig().getDouble("super_pixels_minimum", 1800.0).toLong()
+
     private val wallDetectionConfidence: Float get() = botConfig().getDouble("wall_detection_confidence", 0.5).toFloat()
     private val entityDetectionConfidence: Float get() = botConfig().getDouble("entity_detection_confidence", 0.65).toFloat()
     private val secondsToHoldAttackAfterReachingMax: Double get() = botConfig().getDouble("seconds_to_hold_attack_after_reaching_max", 1.5)
@@ -164,7 +164,11 @@ class Play(
      * Current-frame screen classification, injected for testability. Defaults to the production
      * StateFinder; an "unknown" classification must never be produced by a known menu screen.
      */
-    internal var classifyFrame: (Mat) -> String = { StateFinder.getState(it) }
+    private var classificationGeneration = 0L
+    private var classificationCapturedAtMs = 0L
+    internal var classifyFrame: (Mat) -> String = {
+        StateFinder.getState(it, classificationGeneration, classificationCapturedAtMs)
+    }
 
 
     fun getEntityPos(entity: FloatArray): Pair<Double, Double> =
@@ -495,7 +499,11 @@ class Play(
     @Volatile private var superEvidence: SuperEvidence? = null
     fun checkIfSuperReady(frame: Mat, capturedAtMs: Long = 0L): Boolean {
         val geometry = InputCoordinates.geometryGeneration
-        val point = PhoneVisualCues.superReady(frame)
+        val policy = SuperReadinessPolicy.fromLegacy(
+            botConfig().opt("super_pixels_minimum"),
+            lobbyConfig().opt("pixel_counter_crop_area.super"),
+        )
+        val point = PhoneVisualCues.superReady(frame, policy)
         superEvidence = if (point != null && geometry == InputCoordinates.geometryGeneration)
             SuperEvidence(point, capturedAtMs, geometry) else null
         DiagnosticLog.sample("combat.super_readiness", "ready=${point != null} visual=true")
@@ -602,6 +610,8 @@ class Play(
         onStateChange: (String) -> Unit,
     ) {
         val issuingThread = Thread.currentThread()
+        classificationGeneration = PhoneVisualCues.chaosObservationGeneration()
+        classificationCapturedAtMs = capturedAtMs
         val frameGeneration = synchronized(this) {
             val geometry = InputCoordinates.geometryGeneration
             if (gameplayGeometry != geometry) {
