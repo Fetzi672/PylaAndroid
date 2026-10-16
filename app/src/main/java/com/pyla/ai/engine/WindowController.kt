@@ -248,6 +248,13 @@ class WindowController(
         inputOrWarn("pressCombatAt")?.pressAndRelease(x, y, 60L, guard)
     }
 
+    /** A stationary charge at a visually verified control; never a drag toward an enemy. */
+    fun holdCombatAt(x: Float, y: Float, guard: () -> Boolean) {
+        if (!x.isFinite() || !y.isFinite() || x < 0 || y < 0 || x >= width || y >= height) return
+        if (!guard()) return
+        inputOrWarn("holdCombatAt")?.holdAttackAt(x, y, guard)
+    }
+
     val joystickX: Float get() = InputCoordinates.joystick().first
     val joystickY: Float get() = InputCoordinates.joystick().second
 
