@@ -153,6 +153,32 @@ class WindowController(
     }
 
     /**
+     * Mapped navigation press with a live lifecycle guard.
+     *
+     * Resolves [key] through [InputCoordinates.press] exactly like [press] does for non-combat
+     * keys, then pends it on the non-replayable navigation queue ([InputService.navigationTapOnce]):
+     * one admission attempt at issue and one at dispatch, and it is never restored by combat
+     * recovery. Retains the non-combat [press] hold semantics (`delayMs + 20`).
+     *
+     * The caller passes the [guard] bound to the request's lifecycle epoch (see
+     * [NavigationAuthority]); a false or throwing guard fails closed and stays denied. This is the
+     * guarded path for menu navigation. The generic [press] intentionally drops [guard] for
+     * non-combat keys and routes combat keys through the combat composition instead.
+     */
+    fun guardedNavigationPress(key: String, delayMs: Long = 20, guard: () -> Boolean) {
+        val (bx, by) = InputCoordinates.press(key)
+        if (bx < 0) { PylaLog.w(TAG, "guardedNavigationPress ignored: unknown key '$key'"); return }
+        val input = inputOrWarn("guardedNavigationPress") ?: return
+        if (!guard()) return
+        PylaLog.p(TAG, "guarded navigation press '$key' at ($bx,$by) hold=${delayMs + 20}ms")
+        BotStatus.action("guarded press '$key' at ($bx,$by)")
+        BotStatus.inputConnected = com.pyla.ai.input.InputService.isConnected()
+        releaseMovement()
+        input.releaseJoystick()
+        input.navigationTapOnce(bx.toFloat(), by.toFloat(), delayMs + 20, guard)
+    }
+
+    /**
  * Raw click at a screen point. [guard] applies only to the held-attack (`touchDown` without
  * `touchUp`) branch; the plain tap and the release-only branch are never gated.
  */
@@ -213,6 +239,20 @@ class WindowController(
             return
         }
         releaseAndTap(bx.toFloat(), by.toFloat(), delayMs + 20)
+    }
+
+    /** A visually located combat control, with the same queued combat guard as mapped presses. */
+    fun pressCombatAt(x: Float, y: Float, guard: () -> Boolean) {
+        if (!x.isFinite() || !y.isFinite() || x < 0 || y < 0 || x >= width || y >= height) return
+        if (!guard()) return
+        inputOrWarn("pressCombatAt")?.pressAndRelease(x, y, 60L, guard)
+    }
+
+    /** A stationary charge at a visually verified control; never a drag toward an enemy. */
+    fun holdCombatAt(x: Float, y: Float, guard: () -> Boolean) {
+        if (!x.isFinite() || !y.isFinite() || x < 0 || y < 0 || x >= width || y >= height) return
+        if (!guard()) return
+        inputOrWarn("holdCombatAt")?.holdAttackAt(x, y, guard)
     }
 
     val joystickX: Float get() = InputCoordinates.joystick().first

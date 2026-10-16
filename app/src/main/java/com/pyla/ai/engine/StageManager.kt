@@ -6,7 +6,6 @@ import com.pyla.ai.config.PylaConfig
 import com.pyla.ai.diagnostics.DiagnosticLog
 import org.opencv.core.Mat
 import org.opencv.imgcodecs.Imgcodecs
-import kotlin.concurrent.thread
 
 class StageManager(
     var brawlersPickData: MutableList<MutableMap<String, Any>>,
@@ -16,17 +15,115 @@ class StageManager(
     val playstyleInfo: Map<String, Any>,
     private val navigationAllowed: () -> Boolean = { false },
 ) {
-    companion object { private const val TAG = "PylaStage" }
+    companion object {
+        private const val TAG = "PylaStage"
+
+        /** Granularity of the cancellation-aware Stage waits (all Stage waits poll live authority). */
+        private const val NAV_WAIT_STEP_MS = 100L
+
+        /** PC parity: the end screen must clear within this bounded, monotonic window. */
+        private const val END_SCREEN_TIMEOUT_MS = 35_000L
+
+        /**
+         * Screens Stage is expected to navigate. A positive member is required for every menu action,
+         * so a combat, startup or unclassified screen never authorises a menu tap on its own.
+         */
+        private val MENU_SCREENS = setOf(
+            "lobby", "shop", "brawler_selection", "popup", "defeated", "trophy_reward",
+            "prestige_milestone", "nano_noodles",
+            "star_drop_regular", "star_drop_angelic", "star_drop_demonic", "star_drop_starr_nova",
+            "end_victory", "end_defeat", "end_draw",
+            "end_trio_showdown_0", "end_trio_showdown_1", "end_trio_showdown_2", "end_trio_showdown_3",
+        )
+    }
 
     val trophyObserver = TrophyObserver()
     private val defeatedExitGate = DefeatedExitGate()
     @Volatile private var closed = false
 
-    fun invalidateNavigation() = defeatedExitGate.invalidate(android.os.SystemClock.elapsedRealtime())
+    /**
+     * Stage-owned lifecycle/queue authority for menu navigation.
+     *
+     * Every predicate is wired explicitly; the reviewed [NavigationAuthority] fails closed when a
+     * predicate is left unwired. [sessionLive] carries the engine's [navigationAllowed] (which already
+     * requires the game to be foreground, running and not Pause/Stop) plus this Stage's own terminal
+     * `closed` flag. [menuLive] requires a positive current menu/screen classification, so foreground
+     * equality alone can never authorise navigation. [foregroundLive] is stated as `true` because the
+     * foreground requirement is already enforced inside [sessionLive]. The geometry source stays at
+     * the authority default ([com.pyla.ai.capture.InputCoordinates.geometryGeneration]), so a
+     * rotation/capture-size change revokes an outstanding request.
+     */
+    private val navigationAuthority = NavigationAuthority(
+        sessionLive = { !closed && navigationAllowed() },
+        menuLive = { getState() in MENU_SCREENS },
+        foregroundLive = { true },
+    )
+
+    /**
+     * Advance the Stage lifecycle epoch (Pause/Stop and other revocations) and the defeated-EXIT
+     * evidence gate. Every navigation request issued before this call is denied forever, even if the
+     * live predicates become true again, so an unsampled queued entry can never be renewed by Resume.
+     */
+    fun invalidateNavigation() {
+        navigationAuthority.invalidate()
+        defeatedExitGate.invalidate(android.os.SystemClock.elapsedRealtime())
+    }
+
     fun navigationStateObserved(state: String?) = defeatedExitGate.screenChanged(state)
 
+    /**
+     * One Stage navigation invocation, bound at its start to the lifecycle epoch current at that
+     * moment.
+     *
+     * Every action inside the invocation reuses the SAME [NavigationAuthority.BoundRequest]. A
+     * Pause/Stop that advances the epoch while the invocation is between actions — including during a
+     * bounded wait — denies the whole invocation permanently, so a stale invocation can never renew
+     * itself by issuing a fresh epoch request after a sleep. Each action also re-checks the current
+     * screen and capture freshness at admission and dispatch, because the guard closure is handed to
+     * the non-replayable navigation queue.
+     */
+    private inner class Invocation internal constructor(
+        private val bound: NavigationAuthority.BoundRequest,
+    ) {
+        /** True while this invocation still owns the current epoch and every predicate holds. */
+        val isLive: Boolean get() = bound.allows()
+
+        /** Guard for one action that must still be a positive [expectedState] screen when used. */
+        fun action(expectedState: String): () -> Boolean = {
+            getState() == expectedState && bound.allows()
+        }
+
+        /**
+         * Bounded, cancellation-aware wait. Returns `false` as soon as the invocation is no longer
+         * live — Pause/Stop/close, a predicate false, a geometry change, an interrupt — and never
+         * renews the invocation's authority. A monotonic deadline is not needed here because every
+         * step re-checks liveness; the total is bounded by [ms].
+         */
+        fun await(ms: Long): Boolean {
+            var remaining = ms
+            while (remaining > 0) {
+                if (!bound.allows()) return false
+                val step = remaining.coerceAtMost(NAV_WAIT_STEP_MS)
+                try {
+                    Thread.sleep(step)
+                } catch (_: InterruptedException) {
+                    Thread.currentThread().interrupt()
+                    return false
+                }
+                remaining -= step
+            }
+            return bound.allows()
+        }
+    }
+
+    /** Admit a navigation invocation bound to the epoch current right now, or fail closed. */
+    private fun beginNavigation(): Invocation? {
+        val bound = navigationAuthority.issue() ?: return null
+        return Invocation(bound)
+    }
+
     /** Visible enabled EXIT only, with two fresh captures and a queue-time revocation guard. */
-    private fun exitDefeated() {
+    private fun exitDefeated(invocation: Invocation) {
         if (closed || !navigationAllowed() || getState() != "defeated") return
         val generation = defeatedExitGate.generation()
         val geometry = com.pyla.ai.capture.InputCoordinates.geometryGeneration
@@ -42,7 +139,10 @@ class StageManager(
         )
         val ticket = defeatedExitGate.observe(observation, generation, now) ?: return
         val guard = {
-            !closed && navigationAllowed() && getState() == "defeated" &&
+            // New Stage lifecycle bound guard composed in: the original ticket/pixel/two-fresh-frame
+            // evidence below is unchanged and still required.
+            invocation.isLive &&
+                !closed && navigationAllowed() && getState() == "defeated" &&
                 com.pyla.ai.capture.InputCoordinates.geometryGeneration == geometry &&
                 com.pyla.ai.capture.InputCoordinates.captureWidth == frame.width &&
                 com.pyla.ai.capture.InputCoordinates.captureHeight == frame.height &&
@@ -74,23 +174,26 @@ class StageManager(
         DiagnosticLog.event("stage.do_state", "state=$state queue=${brawlersPickData.size}")
         PylaLog.p(TAG, "doState: $state")
         BotStatus.action("doState: $state")
+        // One invocation per dispatched state, bound to the lifecycle epoch current right now.
+        val invocation = beginNavigation() ?: return
         when (state) {
-            "shop", "brawler_selection" -> quitShop()
-            "popup" -> closePopUp()
-            "defeated" -> exitDefeated()
+            "shop", "brawler_selection" -> quitShop(invocation, state)
+            "popup" -> closePopUp(invocation)
+            "defeated" -> exitDefeated(invocation)
             "match", "match_making", "match_start", "result_preview", "end_ranked", "transition" -> {}
-            "lobby" -> startGame()
+            "lobby" -> startGame(invocation)
             "star_drop_regular", "star_drop_angelic", "star_drop_demonic", "star_drop_starr_nova" ->
-                clickStarDrop(state.removePrefix("star_drop_"))
-            "trophy_reward" -> windowController.press("proceed")
-            "prestige_milestone" -> handlePrestige()
-            "nano_noodles" -> clickNanoNoodles()
+                clickStarDrop(invocation, state)
+            "trophy_reward" ->
+                windowController.guardedNavigationPress("proceed", 20L, invocation.action(state))
+            "prestige_milestone" -> handlePrestige(invocation)
+            "nano_noodles" -> clickNanoNoodles(invocation, state)
             "end_victory", "end_defeat", "end_draw", "end_trio_showdown_0", "end_trio_showdown_1",
-            "end_trio_showdown_2", "end_trio_showdown_3" -> endGame(state)
+            "end_trio_showdown_2", "end_trio_showdown_3" -> endGame(invocation, state)
         }
     }
 
-    fun startGame() {
+    private fun startGame(invocation: Invocation) {
         val currentBrawler = brawlersPickData[0]["brawler"].toString()
         val typeOfPush = brawlersPickData[0]["type"].toString()
         val currentValue = if (typeOfPush == "trophies") trophyObserver.currentTrophies else trophyObserver.currentWins
@@ -113,6 +216,7 @@ class StageManager(
             val next = brawlersPickData[0]
             val nextBrawler = next["brawler"].toString()
             if (toBool(next["automatically_pick"], false)) {
+                if (!invocation.isLive) return
                 val result = lobbyAutomator.selectBrawler(nextBrawler)
                 if (result != "success") throw BrawlerSelectionFailedException(result)
                 if (result == "success") {
@@ -125,15 +229,15 @@ class StageManager(
                 trophyObserver.currentWins = toInt(next["wins"], 0)
                 trophyObserver.winStreak = toInt(next["win_streak"], 0)
                 Log.i(TAG, "Next brawler is in manual mode, waiting 10 seconds to let user switch.")
-                try { Thread.sleep(10_000) } catch (_: InterruptedException) {}
+                if (!invocation.await(10_000)) return
             }
         }
 
         windowController.releaseMovement()
-        windowController.press("proceed")
+        windowController.guardedNavigationPress("proceed", 20L, invocation.action("lobby"))
         PylaLog.p(TAG, "Pressed to start a match")
         BotStatus.action("Pressed PLAY (proceed)")
-        try { Thread.sleep(2000) } catch (_: InterruptedException) {}
+        invocation.await(2_000)
     }
 
     private fun findCanisterBlobs(): List<Pair<Double, Double>> {
@@ -166,7 +270,7 @@ class StageManager(
         return blobs
     }
 
-    private fun clickNanoNoodles() {
+    private fun clickNanoNoodles(invocation: Invocation, state: String) {
         Log.i(TAG, "Nano noodles screen, picking three noodles")
         BotStatus.action("Nano noodles: picking rewards")
         val blobs = findCanisterBlobs()
@@ -177,8 +281,8 @@ class StageManager(
             val y = 740 * hr
             val offset = 330 * hr
             for (x in listOf(cx, cx + offset, cx - offset)) {
-                windowController.releaseAndTap(x, y)
-                try { Thread.sleep(500) } catch (_: InterruptedException) {}
+                windowController.guardedNavigationTap(x, y, invocation.action(state))
+                if (!invocation.await(500)) return
             }
         } else {
             val mid = blobs.size / 2
@@ -189,26 +293,26 @@ class StageManager(
             )
             for (b in order) {
                 Log.i(TAG, "Clicking canister at (${b.first.toInt()},${b.second.toInt()})")
-                windowController.releaseAndTap(b.first.toFloat(), b.second.toFloat())
-                try { Thread.sleep(600) } catch (_: InterruptedException) {}
+                windowController.guardedNavigationTap(b.first.toFloat(), b.second.toFloat(), invocation.action(state))
+                if (!invocation.await(600)) return
             }
         }
-        try { Thread.sleep(1200) } catch (_: InterruptedException) {}
+        if (!invocation.await(1_200)) return
         val remaining = findCanisterBlobs()
         val target = if (remaining.isNotEmpty()) remaining[remaining.size / 2]
         else blobs.getOrNull(blobs.size / 2)
         if (target != null) {
             Log.i(TAG, "Nano noodles: clicking the middle to open rewards (${target.first.toInt()},${target.second.toInt()})")
             BotStatus.action("Nano noodles: opening rewards")
-            windowController.releaseAndTap(target.first.toFloat(), target.second.toFloat())
-            try { Thread.sleep(900) } catch (_: InterruptedException) {}
-            windowController.releaseAndTap(target.first.toFloat(), target.second.toFloat())
+            windowController.guardedNavigationTap(target.first.toFloat(), target.second.toFloat(), invocation.action(state))
+            if (!invocation.await(900)) return
+            windowController.guardedNavigationTap(target.first.toFloat(), target.second.toFloat(), invocation.action(state))
         }
-        try { Thread.sleep(1200) } catch (_: InterruptedException) {}
+        invocation.await(1_200)
     }
 
-    private fun handlePrestige() {
-        windowController.press("continue_or_equip")
+    private fun handlePrestige(invocation: Invocation) {
+        windowController.guardedNavigationPress("continue_or_equip", 20L, invocation.action("prestige_milestone"))
         val entry = brawlersPickData.firstOrNull() ?: return
         if (entry["type"].toString() != "trophies") return
         val floor = when {
@@ -225,16 +329,19 @@ class StageManager(
     }
 
     private fun currentStateFromScreen(): String {
-        val mat = PylaUtils.frameToMat(windowController.screenshot())
-        return try { StateFinder.getState(mat) } finally { mat.release() }
+        val chaosGeneration = PhoneVisualCues.chaosObservationGeneration()
+        val captured = windowController.screenshot()
+        val mat = PylaUtils.frameToMat(captured)
+        return try { StateFinder.getState(mat, chaosGeneration, captured.capturedAtMs) } finally { mat.release() }
     }
 
-    fun endGame(stateName: String) {
+    private fun endGame(invocation: Invocation, stateName: String) {
         var currentState = currentStateFromScreen()
         var buttonPressed = false
         var parsedResult: ParsedGameResult? = null
-        val endScreenTime = nowSec()
-        while (currentState.startsWith("end") && nowSec() - endScreenTime < 35) {
+        val endScreenStartMs = android.os.SystemClock.elapsedRealtime()
+        while (currentState.startsWith("end") &&
+            android.os.SystemClock.elapsedRealtime() - endScreenStartMs < END_SCREEN_TIMEOUT_MS) {
             if (nowSec() - timeSinceLastStatChange > 25) {
                 val rawResult = if (currentState.startsWith("end_")) currentState.removePrefix("end_") else currentState
                 parsedResult = trophyObserver.parseGameResult(rawResult)
@@ -249,24 +356,29 @@ class StageManager(
             }
             if (!buttonPressed && playAgainOnWin && parsedResult != null &&
                 parsedResult.result == MatchResultKind.VICTORY) {
-                windowController.press("play_again")
+                windowController.guardedNavigationPress("play_again", 20L, invocation.action(currentState))
                 buttonPressed = true
             } else {
                 Log.i(TAG, "Game has ended, proceeding")
                 BotStatus.action("End screen ($currentState), pressing proceed")
-                windowController.press("proceed")
+                windowController.guardedNavigationPress("proceed", 20L, invocation.action(currentState))
             }
-            try { Thread.sleep(3000) } catch (_: InterruptedException) {}
+            // Cancellation-aware wait: a Pause/Stop during the end screen aborts the whole invocation
+            // and must NOT fall through to a recovery relaunch.
+            if (!invocation.await(3_000)) return
             currentState = currentStateFromScreen()
         }
 
+        val endScreenTimedOut =
+            android.os.SystemClock.elapsedRealtime() - endScreenStartMs >= END_SCREEN_TIMEOUT_MS
         if (playAgainOnWin && parsedResult?.result == MatchResultKind.VICTORY) {
             handOffToGameplayVerifier()
-        } else if (nowSec() - endScreenTime > 35) {
-            // PC parity: the end screen never went away (frozen game / missed clicks),
-            // restart the game so the bot can never get stuck here.
+        } else if (endScreenTimedOut && currentState.startsWith("end")) {
+            // PC parity: the end screen never went away (frozen game / missed clicks), restart the
+            // game so the bot can never get stuck here. Recovery is allowed only while THIS invocation
+            // is still live (same session/state) with the current verified end-screen context.
             Log.w(TAG, "End screen timeout reached, restarting the game.")
-            relaunchGame()
+            relaunchGame(invocation)
         }
         Log.i(TAG, "Game has ended, current=$currentState")
     }
@@ -278,7 +390,10 @@ class StageManager(
         DiagnosticLog.event("stage.play_again_handoff", "verifier=gameplay_evidence relaunch=false")
     }
 
-    private fun relaunchGame() {
+    private fun relaunchGame(invocation: Invocation) {
+        // The relaunch side effect is a navigation-class action: it may only run while the bound
+        // lifecycle invocation is still live (same session, not Pause/Stop/closed).
+        if (closed || !invocation.isLive) return
         try {
             val pkg = GameLauncher.gamePackage()
             BotStatus.action("Restarting Brawl Stars")
@@ -286,29 +401,45 @@ class StageManager(
         } catch (t: Throwable) {
             Log.w(TAG, "game relaunch failed: ${t.message}")
         }
-        try { Thread.sleep(2000) } catch (_: InterruptedException) {}
+        invocation.await(2_000)
     }
 
 
-    private fun clickStarDrop(dropType: String) {
+    private fun clickStarDrop(invocation: Invocation, state: String) {
+        val dropType = state.removePrefix("star_drop_")
         Log.i(TAG, "Handling star drop: $dropType")
         BotStatus.action("Opening star drop ($dropType)")
         if (dropType in setOf("angelic", "demonic", "starr_nova")) {
-            windowController.press("proceed", delayMs = 8_000)
+            windowController.guardedNavigationPress("proceed", 8_000L, invocation.action(state))
         } else {
             repeat(8) {
-                windowController.press("proceed", delayMs = 50)
-                try { Thread.sleep(100) } catch (_: InterruptedException) {}
+                if (!invocation.isLive) return
+                val chaosGeneration = PhoneVisualCues.chaosObservationGeneration()
+                val captured = windowController.screenshot()
+                val actual = PylaUtils.frameToMat(captured)
+                val observed = try { StateFinder.getState(actual, chaosGeneration, captured.capturedAtMs) } finally { actual.release() }
+                DiagnosticLog.sample("navigation.reward_image", "expected=$state observed=$observed")
+                if (observed != state) {
+                    // A newer image overrules the slower cached state, including already queued taps.
+                    invalidateNavigation()
+                    return
+                }
+                windowController.guardedNavigationPress("proceed", 50L, invocation.action(state))
+                invocation.await(100)
             }
         }
     }
 
-    fun quitShop() {
-        windowController.click(100f * windowController.heightRatio, 60f * windowController.heightRatio)
-        try { Thread.sleep(1000) } catch (_: InterruptedException) {}
+    private fun quitShop(invocation: Invocation, state: String) {
+        windowController.guardedNavigationTap(
+            100f * windowController.heightRatio,
+            60f * windowController.heightRatio,
+            invocation.action(state),
+        )
+        invocation.await(1_000)
     }
 
-    fun closePopUp() {
+    private fun closePopUp(invocation: Invocation) {
         val screenshot = windowController.screenshot()
         if (closePopupIcon == null) {
 
@@ -343,12 +474,13 @@ class StageManager(
         if (mmr.maxVal >= 0.8) {
             val cx = mmr.maxLoc.x + template.cols() / 2
             val cy = mmr.maxLoc.y + template.rows() / 2
-            windowController.click(cx.toFloat(), cy.toFloat())
+            windowController.guardedNavigationTap(cx.toFloat(), cy.toFloat(), invocation.action("popup"))
         }
     }
 
     fun close() {
         closed = true
+        navigationAuthority.close()
         invalidateNavigation()
         closePopupIcon?.release()
         closePopupIcon = null
