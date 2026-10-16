@@ -306,7 +306,20 @@ class Play(
     }
 
     fun attack(touchUp: Boolean = true, touchDown: Boolean = true) {
-        windowController.press("attack", touchUp = touchUp, touchDown = touchDown)
+        // Compatibility entry point: never reintroduce the old blind mapped attack location.
+        synchronized(this) {
+            if (!touchDown) {
+                if (touchUp) releaseAttackInput("explicit_release")
+                return
+            }
+            val evidence = attackButtonEvidence.current(monotonicNowMs(), InputCoordinates.geometryGeneration) ?: return
+            val guard = attackCommandGuard(combatGeneration, evidence.capturedAtMs, touchUp, Thread.currentThread(), evidence.revision)
+            if (touchUp) windowController.pressCombatAt(evidence.point.x, evidence.point.y, guard)
+            else if (!attackButtonDown && guard()) {
+                attackButtonDown = true
+                windowController.holdCombatAt(evidence.point.x, evidence.point.y, guard)
+            }
+        }
     }
     @Synchronized fun useSuper() {
         if (!issueSpecialAbility("super")) return
@@ -707,10 +720,17 @@ class Play(
                 GameplayEvidenceGate.validPlayerBox(it, frame.cols(), frame.rows())
             }.toMutableList()
         }
+        val attackPoint = try { locateAttackButton(frame) } catch (e: Exception) {
+            DiagnosticLog.sample("combat.attack_detection_failed", "type=${e.javaClass.simpleName}")
+            null
+        }
         synchronized(this) {
-            if (frameGeneration != combatGeneration || closed || issuingThread.isInterrupted || !inputAllowed()) return
+            if (frameGeneration != combatGeneration || closed || issuingThread.isInterrupted || !inputAllowed() ||
+                gameplayGeometry != InputCoordinates.geometryGeneration) return
             // No enemy/range/line-of-sight requirement for basic auto attack. Specials retain targets.
-            basicAttackEligible = true
+            val button = attackButtonEvidence.observe(attackPoint, capturedAtMs, monotonicNowMs(), gameplayGeometry)
+            if (button == null) releaseAttackInput("attack_button_unverified")
+            basicAttackEligible = button != null
             activeGameplayFrameMs = capturedAtMs
             activeGameplayTarget = !data["enemy"].isNullOrEmpty() || !data["teammate"].isNullOrEmpty()
         }
@@ -783,6 +803,8 @@ class Play(
 
     /** Engine-owned repeated basic attack. Pure state machine, no ambient clock. */
     private val attackPolicy = RepeatedAttackPolicy(MAX_EVIDENCE_FRAME_AGE_MS, requireNewCapture = false)
+    private val attackButtonEvidence = AttackButtonEvidenceGate(MAX_EVIDENCE_FRAME_AGE_MS)
+    internal var locateAttackButton: (Mat) -> AttackButtonPoint? = AttackButtonDetector::detect
 
     /**
      * Terminal stop: no further attack input may ever be produced and anything held is released.
@@ -800,6 +822,7 @@ class Play(
      */
     @Synchronized fun resetCombat() {
         superEvidence = null
+        attackButtonEvidence.reset()
         basicAttackEligible = false
         activeGameplayFrameMs = 0L
         activeGameplayTarget = false
@@ -854,6 +877,7 @@ class Play(
         capturedAtMs: Long,
         finite: Boolean,
         thread: Thread,
+        buttonRevision: Long? = null,
     ): () -> Boolean = guard@{
         if (closed) false
         // The guard may be sampled on the input thread, where Thread.currentThread() is not the
@@ -862,7 +886,9 @@ class Play(
         else if (combatGeneration != generation) false
         else if (gameplayGeometry != InputCoordinates.geometryGeneration) false
         else if (!inputAllowed()) false
-        else if (!basicAttackEligible || !gameplayFrameCurrent()) false
+        else if (!gameplayFrameCurrent()) false
+        else if (buttonRevision != null && (!basicAttackEligible ||
+            attackButtonEvidence.current(monotonicNowMs(), InputCoordinates.geometryGeneration)?.revision != buttonRevision)) false
         else if (finite && (capturedAtMs <= 0L || capturedAtMs > monotonicNowMs() ||
             monotonicNowMs() - capturedAtMs > MAX_EVIDENCE_FRAME_AGE_MS)) false
         else true
@@ -889,8 +915,14 @@ class Play(
 
     /** Basic auto attack needs admitted gameplay, not an enemy/range/line-of-sight observation. */
     @Synchronized private fun stepEngineBasicAttack(brawler: String, issuingThread: Thread) {
-        if (closed || issuingThread.isInterrupted || !inputAllowed() || !basicAttackEligible || !gameplayFrameCurrent()) {
+        if (closed || issuingThread.isInterrupted || !inputAllowed() || !gameplayFrameCurrent()) {
             resetCombat()
+            return
+        }
+        val button = attackButtonEvidence.current(monotonicNowMs(), InputCoordinates.geometryGeneration)
+        if (!basicAttackEligible || button == null) {
+            releaseAttackInput("attack_button_unverified")
+            DiagnosticLog.sample("combat.attack_idle", "denial=ATTACK_BUTTON_UNVERIFIED mode=continuous")
             return
         }
 
@@ -912,23 +944,21 @@ class Play(
                 )
             }
             BasicAttackAction.TAP -> {
-                windowController.press(
-                    "attack",
-                    touchUp = true,
-                    touchDown = true,
-                    guard = attackCommandGuard(generation, activeGameplayFrameMs, finite = true, thread = issuingThread),
+                windowController.pressCombatAt(
+                    button.point.x, button.point.y,
+                    attackCommandGuard(generation, button.capturedAtMs, finite = true, thread = issuingThread, buttonRevision = button.revision),
                 )
+                BotStatus.action("Attack (auto-aim)")
                 DiagnosticLog.sample("combat.attack_tap", "mode=continuous")
             }
             BasicAttackAction.HOLD -> {
                 attackHeldSinceSec = nowSec()
                 attackButtonDown = true
-                windowController.press(
-                    "attack",
-                    touchUp = false,
-                    touchDown = true,
-                    guard = attackCommandGuard(generation, activeGameplayFrameMs, finite = false, thread = issuingThread),
+                windowController.holdCombatAt(
+                    button.point.x, button.point.y,
+                    attackCommandGuard(generation, button.capturedAtMs, finite = false, thread = issuingThread, buttonRevision = button.revision),
                 )
+                BotStatus.action("Charge attack (auto-aim)")
                 DiagnosticLog.event("combat.attack_hold", "hold=${holdSeconds}s mode=continuous")
             }
             BasicAttackAction.RELEASE -> {

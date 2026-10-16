@@ -1,0 +1,33 @@
+{
+  "fixture": "video-025.0.png",
+  "raw_rgb_at_1370_360": [
+    170,
+    26,
+    39
+  ],
+  "roi": "annulus center1370,410 radius28..44; R>=100 and red>=2*G,2*B excludes outlines/background",
+  "sample_count": 3624,
+  "rgb_min": [
+    138,
+    0,
+    2
+  ],
+  "rgb_max": [
+    211,
+    67,
+    87
+  ],
+  "rgb_median": [
+    177.0,
+    20.0,
+    27.0
+  ],
+  "hue_degrees_min_max": [
+    0.0,
+    359.64497041420117
+  ],
+  "saturation_min_max": [
+    0.647887323943662,
+    1.0
+  ]
+}
