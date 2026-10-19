@@ -66,4 +66,4 @@ PylaAndroid can prepare a diagnostic report to help diagnose problems. Upload is
 
 ## License
 
-The project is distributed under the **CC BY-NC 4.0** license — see [LICENSE](LICENSE) and [CC BY-NC 4.0](https://creativecommons.org/licenses/by-nc/4.0/).
+The project is distributed under the **ANCS-1.0** license — see [LICENSE](LICENSE).
