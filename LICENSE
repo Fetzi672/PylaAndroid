@@ -2,260 +2,420 @@ Attribution Non-Commercial ShareTheSource License, Version 1.0
 
 Short Identifier: ANCS-1.0
 Author: countryside99
-License Name: Attribution Non-Commercial ShareTheSource License, Version 1.0
 
 Copyright © countryside99. All rights reserved except as expressly licensed below.
 
-1. DEFINITIONS
+1. Definitions
+1.1. Software
 
-For the purposes of this License, the following terms shall have the meanings set forth below:
+"Software" means the software identified by the relevant copyright or license notice as being distributed under this License, including its source files, executable forms, documentation, and other materials included as part of the licensed work.
 
-1.1. "Author" means countryside99, the original creator and copyright holder of the Software, or any other person or entity identified in the original copyright notices as a holder of rights in the Software.
+1.2. Source Code
 
-1.2. "Software" means the software, program, application, library, tool, script, algorithm implementation, or other copyrightable work distributed by the Author under this License, including all files, components, materials, and accompanying documentation expressly included with or designated as part of that work.
+"Source Code" means the preferred form of a work for making modifications to it. Source Code includes, as applicable:
 
-1.3. "Source Code" means the complete, preferred form of the Software for understanding, examining, modifying, maintaining, and creating Derivative Works. Source Code includes, without limitation:
+(a) human-readable source files and scripts;
 
-(a) all human-readable source files and scripts;
+(b) build systems, build files, configuration files, dependency specifications, and installation and deployment scripts;
 
-(b) configuration files, build files, build scripts, dependency specifications, and installation and deployment instructions;
+(c) interface definitions, schemas, templates, and other materials necessary to understand or reproduce the work's functionality;
 
-(c) interface definitions, schemas, templates, and other files necessary to understand or reproduce the Software's functionality;
+(d) documentation and technical specifications necessary to understand, build, modify, test, or maintain the work; and
 
-(d) documentation, technical specifications, and modification instructions necessary to understand, build, modify, or maintain the Software;
+(e) the corresponding source-level materials for modifications incorporated into a distributed Derivative Work.
 
-(e) all source-level components and materials created or modified as part of a Derivative Work; and
+Source Code does not require the inclusion of independently developed tools or materials that are neither part of the work nor necessary to build or modify it. Third-party materials are subject to Section 4.7.
 
-(f) any additional materials necessary to build, execute, test, or reproduce the relevant functionality of the Software, to the extent such materials are controlled by the Licensee and are legally capable of being distributed under this License.
+1.3. Derivative Work
 
-Source Code excludes generated binaries and other compiled or minified representations to the extent that they are not the preferred form for making modifications.
+"Derivative Work" means a work based upon or incorporating protectable expression from the Software, including a modification, adaptation, translation, port, or other work that qualifies as a derivative or adapted work under applicable copyright principles.
 
-1.4. "Object Code" means any compiled, assembled, minified, machine-readable, executable, or otherwise non-source representation of the Software.
+A work does not become a Derivative Work solely because it interoperates with, communicates with, or is independently developed for use alongside the Software.
 
-1.5. "Derivative Work" means any work based upon, incorporating, adapting, translating, modifying, extending, transforming, or otherwise creating a copyright-dependent adaptation of the Software or its Source Code, whether in whole or in part, to the extent such work qualifies as a derivative or adapted work under applicable copyright principles. Derivative Works include modified versions, ports, forks, adaptations, and combinations in which the Software or a portion thereof is incorporated.
+1.4. Author and Rights Holder
 
-1.6. "Licensee" or "You" means any natural person or legal entity exercising any right granted under this License, including any person acting on behalf of another person or entity.
+"Author" means countryside99, identified as the original author of the Software.
 
-1.7. "Commercial Use" means any use, exploitation, distribution, deployment, or other activity involving the Software or its Source Code that is intended, designed, or reasonably connected to obtaining, supporting, facilitating, or advancing a commercial, financial, professional, or business advantage, whether or not that activity generates revenue directly.
+"Relevant Rights Holder" means the Author or another person or entity that owns or is authorized to license the particular rights at issue.
+
+1.5. Licensee
+
+"You" or "Licensee" means any person or entity exercising rights granted under this License.
+
+1.6. Distribution
+
+"Distribution" means transferring, publishing, supplying, or otherwise making a copy of the Software or a Derivative Work available to another person or entity, whether through downloads, repositories, physical media, application distribution, or other means.
+
+Distribution does not include merely retaining a private copy or making private modifications that are not provided to another person or entity.
+
+1.7. Commercial Use
+
+"Commercial Use" means any use of the Software or a Derivative Work undertaken for, on behalf of, or in support of a commercial, business, professional, or revenue-generating activity, or for the purpose of obtaining a direct or indirect commercial or business advantage.
 
 Commercial Use includes, without limitation:
 
-(a) selling, licensing, sublicensing, renting, leasing, or otherwise monetizing the Software, its Source Code, or any Derivative Work;
+(a) selling, renting, leasing, licensing for consideration, monetizing, or otherwise commercially exploiting the Software or a Derivative Work;
 
-(b) bundling, embedding, incorporating, or distributing the Software as part of a commercial product, service, subscription, platform, or offering;
+(b) incorporating, bundling, embedding, or distributing the Software as part of a commercial product, service, platform, or offering;
 
-(c) using, deploying, executing, testing, developing with, or maintaining the Software within or on behalf of a commercial enterprise, business, professional practice, or revenue-generating operation;
+(c) using or deploying the Software in the operations of a commercial business or enterprise, including internal development, testing, evaluation, production, administration, and maintenance;
 
-(d) using the Software to provide paid services, hosted services, software-as-a-service (SaaS), consulting, support, processing, or other services for consideration or commercial advantage;
+(d) using the Software to provide paid services, hosted services, software-as-a-service (SaaS), commercial APIs, consulting, or other services provided for commercial advantage;
 
-(e) using the Software to promote, operate, optimize, or support commercial activities, including activities that indirectly benefit a business or commercial organization;
+(e) using the Software to perform professional work or provide deliverables on behalf of a commercial client or employer, including where the Licensee receives no separate payment for using the Software;
 
-(f) using the Software or its Source Code to train, fine-tune, evaluate, benchmark, or otherwise develop artificial intelligence, machine learning, generative AI, or similar computational models intended for Commercial Use, including commercial model training conducted without direct payment to the Licensee;
+(f) using the Software to support advertising, monetization, customer acquisition, commercial data processing, or other business operations;
 
-(g) using the Software to produce, enhance, or operate a product or service intended for commercial distribution or monetization; and
+(g) using the Software or its Source Code to train, fine-tune, evaluate, benchmark, or develop an artificial intelligence or machine-learning system intended for Commercial Use; and
 
-(h) any use undertaken to obtain an economic, financial, competitive, or business advantage, directly or indirectly, regardless of whether payment is received for the particular use.
+(h) permitting, facilitating, or enabling another person to undertake any of the foregoing activities using the Software or a Derivative Work.
 
-A use shall not become non-commercial merely because it is described as experimental, research-oriented, educational, charitable, open, free of charge, or not-for-profit if the actual purpose, context, or reasonably foreseeable effect of that use falls within the foregoing definition.
+Commercial Use does not require the receipt of payment or the generation of a profit. An activity may constitute Commercial Use even if it is free of charge, experimental, preliminary, charitable in part, or described as research or evaluation.
 
-1.8. "Non-Commercial Purpose" means a purpose that is exclusively personal, educational, or otherwise non-commercial, undertaken without any direct or indirect commercial advantage, business purpose, or prohibited AI or machine-learning purpose under Section 3.
+1.8. Non-Commercial Purpose
 
-1.9. "Distribution" means making the Software, Object Code, Source Code, or a Derivative Work available to another person or entity by any means, including downloading, copying, publishing, transferring, transmitting, sharing, hosting, or otherwise providing access.
+"Non-Commercial Purpose" means a purpose that is not Commercial Use under Section 1.7.
 
-1.10. "Recipient" means any person or entity to whom the Software, Object Code, Source Code, or a Derivative Work is distributed or made available.
+Examples include personal study, private experimentation, hobby projects, and genuinely non-commercial educational activities undertaken independently of commercial operations and without the purpose of providing commercial advantage.
 
-1.11. "Prominent Attribution" means a clear, conspicuous, reasonably accessible, and persistent identification of the Author and the original Software, including the original copyright notices and a reference to this License. Attribution must not be hidden, removed, materially obscured, or presented in a manner reasonably likely to mislead recipients regarding authorship or ownership.
+An activity does not qualify as a Non-Commercial Purpose merely because no payment is made for the particular use. The actual purpose and context of the activity determine whether it is permitted.
 
-2. GRANT OF RIGHTS AND ATTRIBUTION
+1.9. Attribution
 
-2.1. Limited License Grant. Subject to strict and continuous compliance with every term and condition of this License, the Author grants You a limited, non-exclusive, worldwide, royalty-free, non-transferable, and revocable license to:
+"Attribution" means a clear and reasonably prominent identification of the Author, preservation of applicable original copyright and license notices, and identification of modifications where required by this License.
 
-(a) view, read, inspect, and study the Software and its Source Code;
+2. Grant of Rights and Attribution
+2.1. License Grant
 
-(b) download, access, and make copies of the Software and its Source Code;
+Subject to compliance with this License, the Relevant Rights Holder grants You a worldwide, non-exclusive, royalty-free copyright license to:
 
-(c) modify, adapt, and create Derivative Works of the Software;
+(a) access, view, download, and study the Software and its Source Code;
 
-(d) use and execute the Software for exclusively personal, educational, or other permitted Non-Commercial Purposes; and
+(b) make copies of the Software and its Source Code;
 
-(e) redistribute unmodified copies and compliant Derivative Works in accordance with this License.
+(c) modify the Software and create Derivative Works;
 
-The foregoing rights are limited to the rights that the Author is legally entitled to grant. No right is granted by implication beyond the express scope of this License.
+(d) use and execute the Software for permitted Non-Commercial Purposes; and
 
-2.2. Attribution Requirement. Every permitted copy, publication, redistribution, and distribution of the Software or a Derivative Work must preserve and display Prominent Attribution.
+(e) distribute the Software and Derivative Works in accordance with Sections 3 and 4.
 
-You must:
+The rights granted are limited to those necessary to exercise the permissions expressly stated in this License.
 
-(a) retain all original copyright notices, author credits, license notices, and other ownership notices included with the Software;
+2.2. Attribution Requirements
+
+Every distributed copy of the Software or a Derivative Work must:
+
+(a) preserve all original copyright notices and license notices included with the Software;
 
 (b) identify countryside99 as the Author of the original Software;
 
-(c) include a complete copy of this License or a valid, accessible reference to its full text;
+(c) include a complete copy of this License or accompany the work with a complete, directly accessible copy as permitted by Section 9;
 
-(d) clearly identify any modifications You have made, where applicable, and distinguish Your contributions from the original work; and
+(d) identify modifications in a reasonably prominent manner; and
 
-(e) ensure that attribution is reasonably visible and accessible to recipients, including through accompanying documentation, a license file, a repository notice, or another appropriate location.
+(e) avoid suggesting that the Author created, approved, or endorses modifications made by another person.
 
-Attribution must not falsely imply that the Author created, endorses, or accepts responsibility for modifications made by You or another person.
+Attribution must not be removed, concealed, or materially altered in a manner that misrepresents authorship or ownership.
 
-2.3. No Removal or Misrepresentation. You must not remove, alter, conceal, or misrepresent the Author's identity, original copyright notices, license terms, or other provenance information. Any additional attribution requirements imposed by the Author in the original distribution must also be preserved to the extent consistent with this License.
+2.3. No Commercial Rights
 
-2.4. No Broader Rights. Except for the express rights granted herein, all rights in and to the Software remain reserved by the Author and any other applicable rights holders. This License does not grant any trademark, service mark, patent, or other intellectual property rights except to the extent expressly stated.
+No Commercial Use is authorized under this License. Any permission for Commercial Use must be expressly granted in a separate written authorization by the Relevant Rights Holder.
 
-3. STRICT NON-COMMERCIAL RESTRICTION
+2.4. Reserved Rights and Patents
 
-3.1. Absolute Prohibition of Commercial Use. Commercial Use of the Software, its Source Code, or any Derivative Work is strictly prohibited.
+Except for the express copyright permissions granted in this License, all rights are reserved by the applicable rights holders.
 
-You must not, directly or indirectly, use, authorize, facilitate, enable, or permit another person to use the Software, its Source Code, or any Derivative Work for Commercial Use.
+No express patent license is granted under this License. Any patent rights, if applicable, remain subject to the rights and permissions independently available from the relevant patent holder. Nothing in this Section excludes a right or limitation that cannot lawfully be excluded.
 
-This prohibition applies regardless of whether the Software is modified or unmodified, distributed or privately used, provided for a fee or free of charge, or used as a primary product or as a supporting component of another activity.
+No trademark or branding license is granted except as necessary to preserve factual attribution and identify the Software.
 
-3.2. Prohibited Activities. Without limiting Section 3.1, You must not:
+2.5. Termination and Revocability
 
-(a) sell, rent, lease, sublicense, monetize, or otherwise commercially exploit the Software, its Source Code, or any Derivative Work;
+The license is subject to the termination provisions in Section 5. It is not independently revocable at will while the Licensee remains in compliance, except where otherwise permitted by applicable law or expressly agreed in writing by the Relevant Rights Holder.
 
-(b) include, bundle, embed, incorporate, or distribute the Software or a Derivative Work as part of a commercial product, paid application, commercial platform, or revenue-generating offering;
+3. Strict Non-Commercial Restriction
+3.1. Prohibition
 
-(c) use, execute, deploy, access, develop with, test, or maintain the Software within a commercial entity, business environment, professional operation, or other commercial undertaking, including where the Software is used internally rather than offered to customers;
+You must not engage in Commercial Use of the Software, its Source Code, or any Derivative Work.
 
-(d) use the Software to provide, support, or operate any paid service, hosted service, SaaS offering, subscription service, commercial API, consulting engagement, or other service intended to generate revenue or commercial advantage;
+This prohibition applies whether the Software is modified or unmodified, whether the activity generates revenue, and whether the Software is used directly or indirectly to support a commercial activity.
 
-(e) use the Software or its Source Code in connection with advertising, monetization, commercial data processing, paid content production, or other activities intended to advance a commercial interest;
+3.2. Prohibited Activities
 
-(f) use the Software or its Source Code to train, fine-tune, evaluate, benchmark, or develop any AI or machine-learning model intended for Commercial Use, including a model distributed commercially, offered through a paid service, licensed for commercial deployment, or used to generate commercial products or services;
+Without limiting Section 3.1, You must not:
 
-(g) permit a third party to undertake any prohibited activity using copies, modifications, services, or access provided by You; or
+(a) sell, monetize, rent, or commercially license the Software or a Derivative Work;
 
-(h) circumvent, disguise, restructure, or indirectly facilitate any activity that would be prohibited if performed directly by You.
+(b) incorporate the Software into a commercial product, paid application, commercial platform, or revenue-generating service;
 
-3.3. No Revenue Threshold or De Minimis Exception. The restrictions in this Section apply regardless of the amount of revenue, the size of the organization, the duration or frequency of use, or whether the activity produces an immediate financial return. No minimum payment, profit, or commercial scale is required for an activity to qualify as Commercial Use.
+(c) use the Software in commercial business operations, including internal business testing, development, evaluation, or deployment;
 
-3.4. Educational and Personal Use. Personal experimentation, private study, non-commercial educational activities, and other exclusively Non-Commercial Purposes are permitted, subject to all other provisions of this License. The description of an activity as educational, personal, academic, research-oriented, or nonprofit does not override the Commercial Use prohibition.
+(d) use the Software to provide a paid service, SaaS offering, commercial API, or other service intended to provide commercial advantage;
 
-3.5. No Implied Exception. Silence, prior tolerance, public availability, free distribution, or the absence of an immediate objection by the Author shall not constitute permission for Commercial Use. Any exception must be granted through a separate, express written authorization from the relevant rights holder.
+(e) use the Software in professional work performed for a commercial employer, client, or undertaking;
 
-3.6. Burden of Compliance. You are responsible for ensuring that Your use of the Software falls within the scope of the rights expressly granted by this License. If a proposed use cannot reasonably be reconciled with the Non-Commercial restrictions, You must refrain from that use unless You obtain separate written authorization from the relevant rights holder.
+(f) use the Software or its Source Code to develop an AI or machine-learning system intended for Commercial Use; or
 
-4. SHARE THE SOURCE: MANDATORY COPYLEFT
+(g) authorize, facilitate, or knowingly enable another person to engage in any prohibited activity through access, copies, or services supplied by You.
 
-4.1. Mandatory License for Derivative Works. Any Derivative Work that You distribute or otherwise make available to a Recipient must be licensed in its entirety under this exact license: the Attribution Non-Commercial ShareTheSource License, Version 1.0 (ANCS-1.0).
+3.3. Free-of-Charge Activities
 
-You must not distribute a Derivative Work under a different license, an additional license that conflicts with ANCS-1.0, or terms that remove, weaken, or contradict any condition of this License.
+Providing the Software without charge does not make an otherwise commercial activity permissible.
 
-4.2. Complete Corresponding Source Code. Whenever You distribute or make available the Software, Object Code, or any Derivative Work, You must make the complete corresponding Source Code of the distributed work available to every Recipient, subject to the following requirements:
+Likewise, the absence of direct payment does not permit internal business use, unpaid work for a commercial organization, or activities that support commercial operations.
 
-(a) the Source Code must include all modifications made by You or incorporated into the distributed Derivative Work;
+3.4. Permitted Activities
 
-(b) the Source Code must be provided in its complete, preferred form for making modifications, rather than solely as compiled, minified, obfuscated, or otherwise modification-obstructing material;
+Subject to all other terms of this License, permitted activities include:
 
-(c) the Source Code must be provided in a full, unencrypted, unobstructed, and reasonably usable form, without passwords, access restrictions, technical barriers, or other mechanisms that prevent a Recipient from accessing, reading, copying, or modifying it;
+(a) personal study and private experimentation;
 
-(d) the Source Code must include the applicable build files, scripts, configuration files, and documentation required by the definition in Section 1.3;
+(b) hobby projects undertaken for personal purposes;
 
-(e) the Source Code must be provided under ANCS-1.0, together with the original copyright notices, Prominent Attribution, and a complete copy of this License; and
+(c) educational exercises conducted for genuinely non-commercial educational purposes;
 
-(f) the Source Code must be made available at the time the corresponding Software or Derivative Work is distributed or made available, without unreasonable delay and without charging a fee specifically for access to the Source Code.
+(d) private modification and testing for personal learning; and
 
-4.3. Public Availability. To satisfy Section 4.2, You must provide the Recipient with a working, direct, and reasonably accessible means of obtaining the complete Source Code. An appropriate means may include a publicly accessible source-code repository, such as a GitHub repository, or an equivalent public hosting service.
+(e) distribution of compliant copies or Derivative Works for Non-Commercial Purposes.
 
-Where You distribute a copy of the Software or a Derivative Work, You must include a working repository URL or another direct source-access reference in the accompanying materials, documentation, distribution page, or other location reasonably accessible to the Recipient.
+These examples are illustrative and do not override the definition of Commercial Use in Section 1.7.
 
-A repository link alone does not satisfy this requirement if the repository is private, incomplete, encrypted, obstructed, unavailable to the Recipient, or otherwise fails to provide the required Source Code.
+3.5. Separate Written Authorization
 
-4.4. No Source Concealment. You must not distribute a Derivative Work while withholding, concealing, encrypting, obfuscating, or otherwise obstructing access to its required Source Code. You must not impose additional contractual or technical restrictions that prevent recipients from exercising the rights granted by ANCS-1.0.
+Commercial Use is permitted only if the Relevant Rights Holder expressly authorizes that use in writing. The authorization must be sufficiently clear to identify the scope of the commercial permission granted.
 
-4.5. Downstream Rights. You must ensure that every Recipient receives the rights and obligations established by ANCS-1.0. You must not impose any additional condition that restricts a Recipient's permitted non-commercial access, study, modification, or redistribution of the Software or its Source Code.
+Permission from a person who does not own or control the relevant rights is insufficient.
 
-Each subsequent distribution of a Derivative Work must preserve the same licensing terms, attribution requirements, source-availability requirements, and Non-Commercial restrictions.
+4. ShareTheSource: Mandatory Copyleft
+4.1. Same-License Requirement
 
-4.6. Modifications and Notices. You must clearly identify modifications made by You, retain all original notices, and avoid representing Your modifications as original work created by the Author. The addition of new features, files, documentation, or other contributions does not exempt the resulting Derivative Work from this Section.
+Every Derivative Work distributed by You must be licensed under the exact license identified as the Attribution Non-Commercial ShareTheSource License, Version 1.0 (ANCS-1.0).
 
-4.7. Independent Materials. This Section applies to Derivative Works and to components that are incorporated into or distributed as part of the Software to the extent those materials fall within the scope of the applicable copyright rights. It does not, by itself, claim ownership over genuinely independent works that neither derive from nor incorporate protectable expression from the Software.
+You must not impose additional terms that remove, weaken, or conflict with the rights and restrictions established by ANCS-1.0.
 
-4.8. No Waiver Through Distribution. Providing the Software or its Source Code publicly, including through a public repository, does not waive the Non-Commercial restrictions, the attribution requirements, the mandatory copyleft conditions, or any other condition of this License.
+This requirement applies to the Derivative Work to the extent that it is based upon or incorporates the Software and is within the scope of the applicable rights held or controlled by the Relevant Rights Holder.
 
-5. TERMINATION AND REVOCATION
+4.2. Complete Corresponding Source Code
 
-5.1. Automatic Termination. This License and all rights granted to You under it shall automatically terminate immediately upon any breach by You of any term or condition of this License, without the requirement of prior notice, demand, or a separate declaration of termination, to the extent permitted by applicable law.
+Whenever You distribute the Software or a Derivative Work, You must make the complete corresponding Source Code for the distributed version available to every Recipient.
 
-5.2. Consequences of Termination. Upon termination, You must immediately cease all activities that depend on the rights granted by this License, including the unauthorized use, reproduction, modification, distribution, or public availability of the Software, its Source Code, and any Derivative Work.
+The Source Code must:
 
-You must promptly cease any prohibited Commercial Use and stop distributing copies that fail to comply with the mandatory Source Code, attribution, or licensing requirements. You must also take reasonable steps to remove or correct unauthorized distributions under Your control.
+(a) include all modifications incorporated into the distributed version;
 
-5.3. Unauthorized Exercise of Rights. Following termination, any further exercise of rights that were granted solely under this License is unauthorized. Such conduct may constitute copyright infringement under applicable copyright law and international copyright protections, in addition to any other claim or remedy available to the relevant rights holder.
+(b) be provided in the preferred form for making modifications;
 
-5.4. No Automatic Cure. A breach shall not be deemed cured merely because You cease the offending conduct after termination. Reinstatement of rights requires the express written authorization of the relevant rights holder, unless reinstatement is otherwise required by applicable law.
+(c) include applicable build files, scripts, configuration files, dependency specifications, and documentation required to build, modify, or maintain the distributed version;
 
-5.5. Rights and Obligations That Survive. Termination does not extinguish any liability, claim, or remedy arising from a breach occurring before termination. Provisions that by their nature are intended to survive termination, including provisions concerning ownership, disclaimers, limitations of liability, interpretation, and enforcement, shall survive to the extent permitted by applicable law.
+(d) be provided in a readable, unencrypted, and unobstructed form, without technical measures that prevent recipients from accessing or modifying it;
 
-5.6. No Waiver. Failure by the Author to enforce a provision, or delay in exercising a right or remedy, shall not constitute a waiver of that provision, right, or remedy.
+(e) include all applicable original notices, attribution, modification notices, and a copy of ANCS-1.0; and
 
-6. DISCLAIMER OF WARRANTY AND LIMITATION OF LIABILITY
+(f) be made available at the time of distribution, without a separate charge for access to the Source Code.
 
-6.1. DISCLAIMER OF WARRANTY.
+4.3. Method of Providing Source Code
+
+You may satisfy Section 4.2 by:
+
+(a) including the complete Source Code with the distributed copy; or
+
+(b) providing a working, direct, and reasonably accessible link to a repository or download location containing the complete corresponding Source Code.
+
+A public repository, including a GitHub repository, is the recommended method.
+
+The Source Code must be accessible to every Recipient without discriminatory access restrictions, mandatory payment, or unnecessary registration requirements.
+
+A link to an incomplete, unavailable, private, or materially obstructed repository does not satisfy this requirement.
+
+4.4. Private Modifications
+
+You may modify the Software for private use without publishing those modifications, provided that the modified Software and its Source Code are not distributed or otherwise made available to another person or entity.
+
+The mere creation, retention, or private use of a modification does not trigger a publication or source-sharing obligation under this License.
+
+If You subsequently distribute the modified Software or a Derivative Work, Sections 4.1 and 4.2 apply to that distribution.
+
+4.5. Modification Notices
+
+You must clearly identify material modifications to the Software in the distributed Source Code or accompanying documentation.
+
+You must preserve original copyright and license notices and must not represent Your modifications as original work created by countryside99.
+
+4.6. Recipients' Rights
+
+You must provide recipients with the rights granted by ANCS-1.0, including the rights to study, modify, and redistribute the Software and Source Code for permitted Non-Commercial Purposes.
+
+You must not impose contractual or technical restrictions that prevent recipients from exercising those rights.
+
+Recipients remain subject to the Non-Commercial restrictions and all other conditions of ANCS-1.0.
+
+4.7. Third-Party Components and Dependencies
+
+This License applies only to rights that the Relevant Rights Holder owns or is authorized to license.
+
+If the Software or a Derivative Work incorporates third-party components, You must:
+
+(a) preserve applicable third-party notices and license terms;
+
+(b) identify separately licensed components where reasonably necessary;
+
+(c) comply with the applicable conditions governing redistribution of those components; and
+
+(d) refrain from representing that ANCS-1.0 grants rights in third-party materials that the Relevant Rights Holder does not control.
+
+You must not knowingly distribute a package in a manner that violates applicable third-party rights.
+
+If a required component cannot lawfully be redistributed, You must not represent that the distributed package contains the complete corresponding source materials unless the applicable obligations can lawfully be satisfied. You must instead exclude or replace the component, obtain the necessary permissions, or refrain from the affected distribution.
+
+Nothing in this License overrides third-party intellectual property rights or grants permission to distribute materials without the necessary authorization.
+
+4.8. Independent Works
+
+This License does not claim ownership over independent works that neither derive from nor incorporate protectable expression from the Software.
+
+Mere interoperability, communication through an interface, or independent development does not automatically make another work a Derivative Work.
+
+Whether a work qualifies as a Derivative Work depends on the applicable rights and circumstances.
+
+5. Termination and Reinstatement
+5.1. Termination for Breach
+
+The rights granted under this License terminate automatically upon a material breach of its terms, subject to the cure provisions in this Section and applicable law.
+
+5.2. Notice and Cure
+
+Where a breach is reasonably capable of remedy, the Relevant Rights Holder may provide written notice identifying the breach and allowing thirty (30) calendar days from receipt of the notice to cure it.
+
+If the breach is not cured within that period, the rights granted under this License shall terminate automatically at the end of the cure period, subject to applicable law.
+
+5.3. Serious or Continuing Violations
+
+Where a breach involves intentional Commercial Use, deliberate concealment of required Source Code, repeated violations after notice, or conduct that cannot reasonably be remedied, the Relevant Rights Holder may terminate the rights immediately by written notice, to the extent permitted by applicable law.
+
+Nothing in this Section limits any remedy that must or may lawfully be exercised without prior notice.
+
+5.4. Consequences of Termination
+
+Upon termination, You must immediately cease exercising the rights granted by this License, except to the extent applicable law provides otherwise.
+
+You must cease unauthorized use and distribution, and take reasonable steps to remove or correct unauthorized distributions under Your control.
+
+Termination does not automatically require the destruction of copies held by unrelated recipients who independently obtained rights under this License and remain in compliance with its terms.
+
+5.5. Reinstatement
+
+The Relevant Rights Holder may reinstate the terminated rights through express written authorization identifying the scope of reinstatement.
+
+Unless that authorization expressly states otherwise, reinstatement applies prospectively and does not waive liability or claims arising from an earlier breach.
+
+5.6. Continuing Obligations
+
+Termination does not extinguish claims, liabilities, or remedies arising before termination. Provisions that by their nature are intended to survive termination shall continue to apply to the extent permitted by applicable law.
+
+6. Disclaimer of Warranty and Limitation of Liability
+6.1. Disclaimer of Warranty
 
 THE SOFTWARE, ITS SOURCE CODE, ALL DERIVATIVE WORKS, AND ALL RELATED MATERIALS ARE PROVIDED "AS IS" AND "AS AVAILABLE", WITHOUT WARRANTY OF ANY KIND, WHETHER EXPRESS, IMPLIED, STATUTORY, OR OTHERWISE, TO THE MAXIMUM EXTENT PERMITTED BY APPLICABLE LAW.
 
-THE AUTHOR EXPRESSLY DISCLAIMS ALL WARRANTIES AND REPRESENTATIONS, INCLUDING, WITHOUT LIMITATION, ANY IMPLIED WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE, SATISFACTORY QUALITY, TITLE, NON-INFRINGEMENT, ACCURACY, RELIABILITY, SECURITY, AVAILABILITY, AND FREEDOM FROM ERRORS OR DEFECTS.
+THE RELEVANT RIGHTS HOLDER DISCLAIMS ALL WARRANTIES THAT MAY LAWFULLY BE DISCLAIMED, INCLUDING ANY IMPLIED WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE, TITLE, NON-INFRINGEMENT, ACCURACY, RELIABILITY, SECURITY, AND FREEDOM FROM ERRORS OR DEFECTS.
 
-THE AUTHOR DOES NOT WARRANT THAT THE SOFTWARE WILL OPERATE WITHOUT INTERRUPTION, THAT IT WILL BE COMPATIBLE WITH ANY PARTICULAR SYSTEM OR ENVIRONMENT, THAT DEFECTS WILL BE CORRECTED, THAT THE SOURCE CODE WILL BE SUITABLE FOR ANY PARTICULAR USE, OR THAT THE SOFTWARE WILL MEET THE LICENSEE'S REQUIREMENTS OR EXPECTATIONS.
+NO WARRANTY IS MADE THAT THE SOFTWARE WILL BE UNINTERRUPTED, ERROR-FREE, SECURE, COMPATIBLE WITH ANY PARTICULAR ENVIRONMENT, OR SUITABLE FOR ANY PARTICULAR PURPOSE.
 
-THE LICENSEE ASSUMES ALL RISKS ASSOCIATED WITH ACCESSING, DOWNLOADING, INSTALLING, EXECUTING, MODIFYING, DISTRIBUTING, OR OTHERWISE USING THE SOFTWARE AND ITS SOURCE CODE. THE LICENSEE IS SOLELY RESPONSIBLE FOR DETERMINING THE SUITABILITY OF THE SOFTWARE, IMPLEMENTING APPROPRIATE SECURITY MEASURES, MAINTAINING BACKUPS, AND VERIFYING THE RESULTS OF ITS USE.
+YOU ASSUME RESPONSIBILITY FOR DETERMINING THE SUITABILITY OF THE SOFTWARE, VERIFYING ITS RESULTS, MAINTAINING APPROPRIATE BACKUPS, AND IMPLEMENTING REASONABLE SECURITY MEASURES.
 
-6.2. LIMITATION AND EXCLUSION OF LIABILITY.
+6.2. Limitation of Liability
 
-TO THE MAXIMUM EXTENT PERMITTED BY APPLICABLE LAW, THE AUTHOR SHALL NOT BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, CONSEQUENTIAL, EXEMPLARY, OR PUNITIVE DAMAGES, OR FOR ANY OTHER LOSS OR DAMAGE ARISING OUT OF OR IN CONNECTION WITH THE SOFTWARE, ITS SOURCE CODE, THIS LICENSE, OR ANY USE OR INABILITY TO USE THE SOFTWARE.
+TO THE MAXIMUM EXTENT PERMITTED BY APPLICABLE LAW, THE RELEVANT RIGHTS HOLDER SHALL NOT BE LIABLE FOR DAMAGES ARISING OUT OF OR IN CONNECTION WITH THE SOFTWARE, ITS SOURCE CODE, THIS LICENSE, OR THE USE OR INABILITY TO USE THE SOFTWARE.
 
-THIS EXCLUSION INCLUDES, WITHOUT LIMITATION, LOSS OF PROFITS, REVENUE, BUSINESS OPPORTUNITIES, CONTRACTS, CUSTOMERS, GOODWILL, DATA, FILES, SYSTEM AVAILABILITY, OR BUSINESS CONTINUITY; DATA CORRUPTION OR LOSS; SYSTEM DAMAGE OR FAILURE; SECURITY INCIDENTS; INTERRUPTION OF OPERATIONS; THIRD-PARTY CLAIMS; AND ANY LEGAL, REGULATORY, CONTRACTUAL, OR OTHER CONSEQUENCES ARISING FROM THE LICENSEE'S USE, MODIFICATION, DISTRIBUTION, OR MISUSE OF THE SOFTWARE.
+THIS EXCLUSION INCLUDES, TO THE EXTENT LAWFULLY EXCLUDABLE, DIRECT, INDIRECT, INCIDENTAL, SPECIAL, CONSEQUENTIAL, EXEMPLARY, AND PUNITIVE DAMAGES, LOSS OF PROFITS, REVENUE, BUSINESS OPPORTUNITIES, DATA, GOODWILL, OR BUSINESS CONTINUITY, SYSTEM FAILURE, SECURITY INCIDENTS, AND THIRD-PARTY CLAIMS.
 
-THE AUTHOR SHALL NOT BE LIABLE FOR ANY DAMAGES OR CONSEQUENCES RESULTING FROM ERRORS, DEFECTS, VULNERABILITIES, INCOMPATIBILITY, UNAUTHORIZED ACCESS, IMPROPER CONFIGURATION, OR THE LICENSEE'S FAILURE TO COMPLY WITH APPLICABLE OBLIGATIONS OR TO IMPLEMENT APPROPRIATE SAFEGUARDS.
+THE RELEVANT RIGHTS HOLDER SHALL NOT BE LIABLE FOR LEGAL, CONTRACTUAL, REGULATORY, OR OTHER CONSEQUENCES ARISING FROM YOUR USE, MODIFICATION, OR DISTRIBUTION OF THE SOFTWARE, EXCEPT TO THE EXTENT SUCH LIABILITY CANNOT LAWFULLY BE EXCLUDED.
 
-THESE EXCLUSIONS APPLY REGARDLESS OF THE FORM OF ACTION OR LEGAL THEORY, INCLUDING CONTRACT, TORT, NEGLIGENCE, STRICT LIABILITY, OR ANY OTHER BASIS OF CLAIM, AND REGARDLESS OF WHETHER THE AUTHOR HAS BEEN ADVISED OF OR COULD REASONABLY HAVE FORESEEN THE POSSIBILITY OF SUCH DAMAGES.
+THESE LIMITATIONS APPLY REGARDLESS OF THE FORM OF CLAIM OR LEGAL THEORY, TO THE MAXIMUM EXTENT PERMITTED BY APPLICABLE LAW.
 
-THE LICENSEE ACKNOWLEDGES THAT THE SOFTWARE IS PROVIDED WITHOUT ANY PROMISE OF SUPPORT, MAINTENANCE, UPDATES, SECURITY FIXES, OR CONTINUED AVAILABILITY, UNLESS THE AUTHOR EXPRESSLY AGREES OTHERWISE IN A SEPARATE WRITTEN AGREEMENT.
+6.3. Mandatory Legal Limits
 
-6.3. Scope of Disclaimer. The disclaimers and limitations in this Section shall apply to the maximum extent legally permitted. Nothing in this License shall be interpreted as excluding or limiting liability to the extent such exclusion or limitation is prohibited by applicable law. Where a limitation is unenforceable, it shall apply to the fullest enforceable extent.
+Nothing in this Section excludes or limits liability, remedies, or warranties to the extent that applicable law prohibits their exclusion or limitation.
 
-7. GOVERNING PRINCIPLES AND SEVERABILITY
+Any unenforceable exclusion or limitation shall be applied only to the maximum extent legally permitted, without invalidating the remaining provisions of this Section.
 
-7.1. International Copyright Principles. This License shall be interpreted consistently with applicable international copyright principles and international copyright treaties, including the Berne Convention for the Protection of Literary and Artistic Works, as applicable to the relevant rights and circumstances.
+7. Interpretation, Severability, and Amendments
+7.1. International Copyright Principles
 
-Nothing in this Section shall be interpreted as asserting that an international treaty, by itself, supplies a complete system of contract law or resolves every question of interpretation, validity, or enforcement. Matters not resolved by applicable international copyright principles shall be determined in accordance with the applicable legal rules governing the relevant issue, without implying a geographic preference or selecting a particular jurisdiction through this License.
+This License shall be interpreted consistently with applicable international copyright principles and international copyright treaties, including the Berne Convention for the Protection of Literary and Artistic Works, to the extent applicable.
 
-7.2. Severability. If any provision of this License is found to be invalid, unlawful, or unenforceable under an applicable legal rule, that provision shall be severed or limited only to the minimum extent necessary to address the invalidity, unlawfulness, or unenforceability. The remaining provisions shall remain in full force and effect to the maximum extent permitted by applicable law.
+International copyright treaties do not necessarily determine all contractual issues, and this Section does not purport to establish a complete or universally applicable system of governing law.
 
-Where legally permissible, an invalid or unenforceable provision shall be interpreted or replaced by an enforceable provision that most closely preserves its original purpose and intended effect without materially expanding the rights granted to the Licensee.
+Questions not resolved by applicable international copyright principles shall be determined under the legal rules applicable to the relevant issue.
 
-7.3. No Implied Waiver. The failure or delay of the Author in exercising any right or enforcing any provision of this License shall not constitute a waiver of that right or provision. A waiver shall be effective only to the extent expressly made in writing by the relevant rights holder.
+7.2. Severability
 
-7.4. Entire License. This License constitutes the complete statement of the terms under which the Author grants the rights expressly described herein with respect to the Software. It supersedes prior statements or understandings concerning those same licensed rights, except for separate written agreements or additional permissions expressly issued by the relevant rights holder.
+If any provision of this License is held invalid, unlawful, or unenforceable under an applicable legal rule, that provision shall be limited or severed only to the minimum extent necessary.
 
-7.5. Amendments. No amendment to this License shall bind the Author or any other rights holder unless expressly authorized by that rights holder. The Author may publish a new version of this License, but a new version shall not automatically replace the terms governing copies already distributed under ANCS-1.0 unless the applicable rights holder expressly authorizes that change.
+The remaining provisions shall remain in full force and effect to the maximum extent permitted by applicable law.
 
-7.6. No Agency or Endorsement. Nothing in this License creates an employment relationship, partnership, agency, joint venture, or endorsement relationship between the Author and any Licensee. No Licensee may claim that the Author endorses, certifies, or accepts responsibility for a use, modification, or distribution of the Software.
+Where legally permissible, an invalid or unenforceable provision may be interpreted or replaced by an enforceable provision that most closely preserves its original purpose without materially expanding the rights granted under this License.
 
-8. ACCEPTANCE AND COMPLIANCE
+7.3. No Waiver
 
-8.1. Acceptance Through Exercise of Rights. By exercising any right granted under this License, including downloading, copying, using, modifying, or distributing the Software or its Source Code, You acknowledge that You have read, understood, and agreed to be bound by the terms and conditions of ANCS-1.0, to the extent such acceptance is recognized under applicable law.
+A failure or delay in enforcing a provision does not constitute a waiver of that provision or any other right.
 
-If You do not agree to these terms, You must not exercise the rights granted by this License.
+A waiver is effective only to the extent expressly authorized in writing by the Relevant Rights Holder.
 
-8.2. Compliance Is a Condition of Permission. Compliance with all applicable provisions of this License is a condition of every permission granted herein. No provision shall be interpreted as granting permission for an activity expressly prohibited by another provision.
+7.4. License Versions
 
-8.3. No Additional Permission by Implication. The Author's publication, distribution, or disclosure of the Software or its Source Code does not imply consent to Commercial Use, unrestricted relicensing, removal of attribution, or distribution without the required Source Code.
+The Author may publish new versions of ANCS-1.0 or separate license terms for future distributions.
 
-8.4. Separate Written Authorization. Any permission outside the scope of ANCS-1.0 must be obtained in a separate written authorization from the relevant rights holder. Unless that authorization expressly states otherwise, it shall not be construed as modifying this License for other Licensees or other distributions.
+Publication of a new version does not automatically change the terms governing copies already distributed under ANCS-1.0. Those copies remain governed by ANCS-1.0 unless the Relevant Rights Holder expressly authorizes a change or applicable law provides otherwise.
 
-9. LICENSE IDENTIFICATION
+7.5. Written Permissions
 
-This License shall be identified as:
+Any separate permission or amendment affecting rights controlled by the Relevant Rights Holder must be expressly documented in writing by a person authorized to grant it.
 
-Attribution Non-Commercial ShareTheSource License, Version 1.0 (ANCS-1.0)
+No permission shall be inferred solely from public availability, silence, prior tolerance, or the absence of an objection.
 
-The following notice may be included in the Software's source files, documentation, or repository:
+7.6. No Agency or Endorsement
+
+Nothing in this License creates an employment relationship, partnership, agency, or joint venture between You and the Author.
+
+You must not claim that the Author endorses or accepts responsibility for Your modifications, distributions, or uses of the Software.
+
+8. Acceptance and Compliance
+8.1. Exercise of Licensed Rights
+
+By exercising rights expressly granted under this License, You agree to comply with the applicable conditions governing those rights, to the extent such agreement is recognized under applicable law.
+
+This Section does not assert that mere access, viewing, or other conduct necessarily constitutes contractual acceptance in every legal system.
+
+8.2. Non-Compliance
+
+If You do not agree to the conditions governing the rights You wish to exercise, You must refrain from exercising those licensed rights.
+
+All permissions remain subject to the Non-Commercial restriction, attribution obligations, mandatory source-sharing requirements, and termination provisions of this License.
+
+8.3. No Implied Permission
+
+No provision of this License shall be interpreted as authorizing conduct expressly prohibited elsewhere in the License.
+
+9. License Identification and Distribution Notices
+9.1. License Identity
+
+The full name of this License is:
+
+Attribution Non-Commercial ShareTheSource License, Version 1.0 (ANCS-1.0).
+
+9.2. Standard Notice
+
+The following notice may be included in source files, documentation, and repositories:
 
 Copyright © countryside99. Licensed under the Attribution Non-Commercial ShareTheSource License, Version 1.0 (ANCS-1.0).
 
-A complete copy of the License must accompany distributions of the Software and any Derivative Work.
+9.3. Distribution Requirements
+
+A complete copy of ANCS-1.0 must accompany each distribution of the Software or a Derivative Work, either as a license file included in the distribution or through another method that provides every Recipient with a complete and directly accessible copy.
+
+Where the Software or a Derivative Work is distributed as a binary or executable, You must also provide the Source Code access method required by Section 4.
+
+Including the Source Code repository URL in release notes, distribution documentation, or the accompanying README is recommended.
 
 END OF LICENSE
