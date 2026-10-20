@@ -37,7 +37,7 @@ object OverlayStatusText {
         val separator = " | "
         val full = fields.joinToString(separator)
         if (measure(full) <= width) return full
-        if (fields.size != 4) return fit(full, width, measure)
+        if (fields.size != 5) return fit(full, width, measure)
         val minimum = listOf(fields[0], "State: …", "Check: …", "Last: …")
         val budgets = minimum.map(measure).toMutableList()
         var extra = width - budgets.sum() - measure(separator) * 3
