@@ -8,7 +8,8 @@ object OverlayStatusText {
     const val PREFIX = "PYLA"
     const val ELLIPSIS = "…"
     const val NO_ACTION = "No active action"
-
+    const val DISCLAIMER = "Overlay could make the bot not see properly the screen. Please use with caution"
+    
     /** Engine state label used both in the strip and in the bubble content description. */
     fun engineState(running: Boolean, paused: Boolean): String = when {
         running && paused -> "Paused"
