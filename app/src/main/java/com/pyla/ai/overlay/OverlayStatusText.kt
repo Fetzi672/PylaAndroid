@@ -7,8 +7,8 @@ package com.pyla.ai.overlay
 object OverlayStatusText {
     const val PREFIX = "PYLA"
     const val ELLIPSIS = "…"
-    const val NO_ACTION = "No active action"
-    const val DISCLAIMER = "Overlay could make the bot not see properly the screen. Please use with caution"
+    const val NO_ACTION = "No active action || DISCLAIMER: USE OVERLAY WITH CAUTION, IT COULD MAKE THE BOT NOT SEE SOME THINGS ON THE SCREEN!"
+
     
     /** Engine state label used both in the strip and in the bubble content description. */
     fun engineState(running: Boolean, paused: Boolean): String = when {
@@ -29,7 +29,7 @@ object OverlayStatusText {
     fun parts(engineLabel: String, stateLine: String, checkLine: String, last: String): List<String> {
         fun single(value: String) = value.replace(Regex("\\s+"), " ").trim()
         return listOf("$PREFIX ${single(engineLabel)}", single(stateLine).ifBlank { "State: Unknown" },
-            single(checkLine).ifBlank { "Check: Stopped" }, "Last: ${single(last).ifBlank { NO_ACTION }}", "Important Disclaimer: ${single(DISCLAIMER)}" )
+            single(checkLine).ifBlank { "Check: Stopped" }, "Last: ${single(last).ifBlank { NO_ACTION }}")
     }
 
     /** Keep all four fields visible; truncate values rather than dropping Last entirely. */
