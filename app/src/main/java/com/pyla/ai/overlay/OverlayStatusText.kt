@@ -7,7 +7,7 @@ package com.pyla.ai.overlay
 object OverlayStatusText {
     const val PREFIX = "PYLA"
     const val ELLIPSIS = "…"
-    const val NO_ACTION = "No active action || DISCLAIMER: USE OVERLAY WITH CAUTION, IT COULD MAKE THE BOT NOT SEE SOME THINGS ON THE SCREEN!"
+    const val NO_ACTION = "No active action || DISCLAIMER: USE OVERLAY WITH CAUTION! IT MAY NOT LET THE BOT SEE THINGS ON THE SCREEN!"
 
     
     /** Engine state label used both in the strip and in the bubble content description. */
@@ -37,7 +37,7 @@ object OverlayStatusText {
         val separator = " | "
         val full = fields.joinToString(separator)
         if (measure(full) <= width) return full
-        if (fields.size != 5) return fit(full, width, measure)
+        if (fields.size != 4) return fit(full, width, measure)
         val minimum = listOf(fields[0], "State: …", "Check: …", "Last: …")
         val budgets = minimum.map(measure).toMutableList()
         var extra = width - budgets.sum() - measure(separator) * 3
