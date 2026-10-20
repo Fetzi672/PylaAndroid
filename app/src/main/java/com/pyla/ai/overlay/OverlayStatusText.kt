@@ -29,7 +29,7 @@ object OverlayStatusText {
     fun parts(engineLabel: String, stateLine: String, checkLine: String, last: String): List<String> {
         fun single(value: String) = value.replace(Regex("\\s+"), " ").trim()
         return listOf("$PREFIX ${single(engineLabel)}", single(stateLine).ifBlank { "State: Unknown" },
-            single(checkLine).ifBlank { "Check: Stopped" }, "Last: ${single(last).ifBlank { NO_ACTION }}")
+            single(checkLine).ifBlank { "Check: Stopped" }, "Last: ${single(last).ifBlank { NO_ACTION }}", "Important Disclaimer: ${single(DISCLAIMER)}" )
     }
 
     /** Keep all four fields visible; truncate values rather than dropping Last entirely. */
