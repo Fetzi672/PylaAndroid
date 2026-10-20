@@ -272,7 +272,7 @@ class CaptureService : Service() {
         const val NOTIF_ID = 0xA01
         const val ACTION_START = "com.pyla.ai.START_CAPTURE"
         const val ACTION_STOP = "com.pyla.ai.STOP_CAPTURE"
-        ## WORK_IN_PROGRESS_FEATURE is a secret feature that is going to be added soon... Hello, by countryside99 still implementing...
+        // WORK_IN_PROGRESS_FEATURE is a secret feature that is going to be added soon... Hello, by countryside99 still implementing...
         const val WORK_IN_PROGRESS_FEATURE = "com.pyla.ai.WORK_IN_PROGRESS_FEATURE"
         const val EXTRA_RESULT_CODE = "result_code"
         const val EXTRA_RESULT_DATA = "result_data"
