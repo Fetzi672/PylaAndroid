@@ -15,9 +15,17 @@ object StateFinder {
     private const val ORIG_W = 1920
     private const val ORIG_H = 1080
 
+    /**
+     * Correlation floor for an INDEPENDENT menu control. Higher than the 0.7 default used inside a
+     * narrow configured region, because this probe searches a wide band where a false match would
+     * remove the only corroboration the ambiguous brawler menu has.
+     */
+    private const val MENU_CONTROL_THRESHOLD = 0.90
+
     private val statesPath get() = PylaConfig.resolve("images/states/")
     private val starDropsPath get() = PylaConfig.resolve("images/star_drop_types/")
     private val endResultsPath get() = PylaConfig.resolve("images/end_results/")
+    private val brawlerMenuSearchPath get() = File(statesPath, "brawler_menu_search.png").absolutePath
 
     private val lobbyConfig: TomlLite = PylaConfig.load("cfg/lobby_config.toml")
     private val matchResultRegion: List<Int> = lobbyConfig.getIntArray("template_matching.match_result")
@@ -42,15 +50,18 @@ object StateFinder {
         templateCache[key]?.let { return it }
         val file = File(path)
         val videoCue = file.parentFile?.name == "video_state_cues"
-        if (!videoCue && !file.exists() && path !in templateMissingLogged) {
+        val menuSearchCue = file.parentFile?.name == "states" && file.name == "brawler_menu_search.png"
+        if (!videoCue && !menuSearchCue && !file.exists() && path !in templateMissingLogged) {
             PylaLog.w(TAG, "Template file DOES NOT EXIST on disk: $path (cwd=${System.getProperty("user.dir")})")
             templateMissingLogged.add(path)
         }
-        val raw = if (videoCue) {
+        val raw = if (videoCue || menuSearchCue) {
             // Read new packaged cues directly. Bumping AssetBundler's global version would
             // overwrite the user's retained configuration on an in-place update.
             try {
-                val bytes = com.pyla.ai.PylaApp.ctx().assets.open("pyla/images/video_state_cues/${file.name}").use { it.readBytes() }
+                val asset = if (videoCue) "pyla/images/video_state_cues/${file.name}"
+                    else "pyla/images/states/brawler_menu_search.png"
+                val bytes = com.pyla.ai.PylaApp.ctx().assets.open(asset).use { it.readBytes() }
                 val encoded = org.opencv.core.MatOfByte(*bytes)
                 try { org.opencv.imgcodecs.Imgcodecs.imdecode(encoded, org.opencv.imgcodecs.Imgcodecs.IMREAD_COLOR) }
                 finally { encoded.release() }
@@ -243,32 +254,148 @@ object StateFinder {
         return VideoScreenStateCues.classify(matches)
     }
 
+    /**
+     * Classifier output plus the menu-identity evidence it was derived from.
+     *
+     * The state string stays the single API every consumer reads; [identity] is the extra,
+     * non-permissive evidence that menu navigation (and match revocation) must consult, because a
+     * single-template correlation is not menu identity.
+     */
+    data class StateObservation(val state: String, val identity: MenuIdentityAdmission.Identity) {
+        val menuConfirmed: Boolean get() = identity.confirmed
+    }
+
+    /** Neutral identity for states that have no ambiguous menu evidence. */
+    private fun neutralIdentity(state: String) = MenuIdentityAdmission.evaluate(
+        state = state, primaryControl = false, independentControl = false, gameplayControl = false,
+    )
+
     fun getState(
         screenshot: Mat,
         chaosGeneration: Long? = null,
         capturedAtMs: Long = android.os.SystemClock.elapsedRealtime(),
-    ): String {
-        val result = classifyState(screenshot, chaosGeneration, capturedAtMs)
-        if (chaosGeneration != null && result != "unknown" && !result.startsWith("star_drop_"))
+    ): String = getStateObservation(screenshot, chaosGeneration, capturedAtMs).state
+
+    fun getStateObservation(
+        screenshot: Mat,
+        chaosGeneration: Long? = null,
+        capturedAtMs: Long = android.os.SystemClock.elapsedRealtime(),
+    ): StateObservation {
+        val result = classifyObservation(screenshot, chaosGeneration, capturedAtMs)
+        if (chaosGeneration != null && result.state != "unknown" && !result.state.startsWith("star_drop_"))
             PhoneVisualCues.revokeChaosContinuation(chaosGeneration)
         return result
     }
 
-    private fun classifyState(screenshot: Mat, chaosGeneration: Long?, capturedAtMs: Long): String {
-        findGameResult(screenshot)?.let { PylaLog.p(TAG, "State: end_$it (${screenshot.cols()}x${screenshot.rows()})"); return "end_$it" }
-        videoScreenState(screenshot)?.let { return it }
-        if (PhoneVisualCues.isChaosDrop(screenshot, chaosGeneration = chaosGeneration, capturedAtMs = capturedAtMs)) return "star_drop_regular"
-        if (inNanoNoodles(screenshot)) { PylaLog.p(TAG, "State: nano_noodles"); return "nano_noodles" }
-        inStarDrop(screenshot)?.let { PylaLog.p(TAG, "State: star_drop_$it"); return "star_drop_$it" }
-        if (inTrophyReward(screenshot)) { PylaLog.p(TAG, "State: trophy_reward"); return "trophy_reward" }
-        if (inPrestigeMilestone(screenshot)) { PylaLog.p(TAG, "State: prestige_milestone"); return "prestige_milestone" }
-        if (inLobby(screenshot)) { PylaLog.p(TAG, "State: lobby"); return "lobby" }
-        if (inMatchMaking(screenshot)) { PylaLog.p(TAG, "State: match_making"); return "match_making" }
-        if (inBrawlerSelection(screenshot)) { PylaLog.p(TAG, "State: brawler_selection"); return "brawler_selection" }
-        if (inShop(screenshot)) { PylaLog.p(TAG, "State: shop"); return "shop" }
-        if (inOfferPopup(screenshot)) { PylaLog.p(TAG, "State: popup"); return "popup" }
-        if (inBrawlPass(screenshot) || inStarRoad(screenshot)) { PylaLog.p(TAG, "State: shop (brawl_pass/star_road)"); return "shop" }
+    /**
+     * Independent brawler-menu identity control.
+     *
+     * The pinned upstream search control corroborates the heart (AND, never upstream's broad OR).
+     * Read it directly from this APK so retained installs do not need a global asset overwrite.
+     * The header band derives from the user's configured heart region, not guessed coordinates.
+     * The old unused task/checkmark asset is deliberately NOT treated as menu-specific evidence.
+     */
+    private fun hasBrawlerMenuSearchControl(image: Mat): Boolean {
+        val region = regions.getIntArray("template_matching.brawler_menu_heart")
+        if (region.size < 4 || region[3] <= 0) return false
+        val curH = image.rows(); val curW = image.cols()
+        if (curH <= 0 || curW <= 0) return false
+        val hr = curH.toDouble() / ORIG_H
+        val y0 = (region[1] * hr).toInt().coerceIn(0, curH)
+        val bandH = (region[3] * hr).toInt().coerceAtMost(curH - y0)
+        if (bandH <= 0) return false
+        val template = loadTemplate(brawlerMenuSearchPath, curW, curH)
+        if (template.empty()) return false
+        if (template.cols() > curW || template.rows() > bandH) return false
+        val band = Mat(image, Rect(0, y0, curW, bandH))
+        val scores = Mat()
+        return try {
+            Imgproc.matchTemplate(band, template, scores, Imgproc.TM_CCOEFF_NORMED)
+            val match = org.opencv.core.Core.minMaxLoc(scores)
+            match.maxVal.isFinite() && match.maxVal >= MENU_CONTROL_THRESHOLD
+        } catch (t: Throwable) {
+            com.pyla.ai.diagnostics.DiagnosticLog.failure("state", "menu_control", "probe_failed", t)
+            false
+        } finally {
+            band.release(); scores.release()
+        }
+    }
+
+    /**
+     * Positive gameplay evidence from the validated production attack-control recognizer.
+     *
+     * A visible red attack ring means this exact frame is an in-match HUD frame, so no menu state
+     * can be derived from it. Only evaluated inside the ambiguous menu branches, so the cost is
+     * paid exactly where the ambiguity exists.
+     */
+    private fun hasGameplayHudControl(image: Mat): Boolean? = try {
+        AttackButtonDetector.detect(image) != null
+    } catch (t: Throwable) {
+        com.pyla.ai.diagnostics.DiagnosticLog.failure("state", "gameplay_control", "probe_failed", t)
+        // Detector failure is neither positive gameplay nor evidence that gameplay is absent.
+        // Callers must deny menu admission instead of treating the exception as a negative.
+        null
+    }
+
+    private fun classifyObservation(screenshot: Mat, chaosGeneration: Long?, capturedAtMs: Long): StateObservation {
+        findGameResult(screenshot)?.let {
+            PylaLog.p(TAG, "State: end_$it (${screenshot.cols()}x${screenshot.rows()})")
+            return StateObservation("end_$it", neutralIdentity("end_$it"))
+        }
+        videoScreenState(screenshot)?.let { return StateObservation(it, neutralIdentity(it)) }
+        if (PhoneVisualCues.isChaosDrop(screenshot, chaosGeneration = chaosGeneration, capturedAtMs = capturedAtMs))
+            return StateObservation("star_drop_regular", neutralIdentity("star_drop_regular"))
+        if (inNanoNoodles(screenshot)) { PylaLog.p(TAG, "State: nano_noodles"); return StateObservation("nano_noodles", neutralIdentity("nano_noodles")) }
+        inStarDrop(screenshot)?.let {
+            PylaLog.p(TAG, "State: star_drop_$it")
+            return StateObservation("star_drop_$it", neutralIdentity("star_drop_$it"))
+        }
+        if (inTrophyReward(screenshot)) { PylaLog.p(TAG, "State: trophy_reward"); return StateObservation("trophy_reward", neutralIdentity("trophy_reward")) }
+        if (inPrestigeMilestone(screenshot)) { PylaLog.p(TAG, "State: prestige_milestone"); return StateObservation("prestige_milestone", neutralIdentity("prestige_milestone")) }
+        if (inLobby(screenshot)) { PylaLog.p(TAG, "State: lobby"); return StateObservation("lobby", neutralIdentity("lobby")) }
+        if (inMatchMaking(screenshot)) { PylaLog.p(TAG, "State: match_making"); return StateObservation("match_making", neutralIdentity("match_making")) }
+        if (inBrawlerSelection(screenshot)) {
+            // Heart alone is not menu identity: it is corroborated by a second independent menu
+            // control, and any visible in-match HUD control vetoes the menu classification.
+            val identity = MenuIdentityAdmission.evaluate(
+                state = "brawler_selection",
+                primaryControl = true,
+                independentControl = hasBrawlerMenuSearchControl(screenshot),
+                gameplayControl = hasGameplayHudControl(screenshot)
+                    ?: return StateObservation("unknown", neutralIdentity("unknown")),
+            )
+            val published = MenuIdentityAdmission.publicState(identity)
+            if (published == "brawler_selection") {
+                PylaLog.p(TAG, "State: brawler_selection (${identity.level})")
+            } else {
+                PylaLog.w(TAG, "brawler_selection evidence rejected (${identity.level}: ${identity.reason})")
+            }
+            return StateObservation(published, identity)
+        }
+        if (inShop(screenshot)) {
+            val identity = MenuIdentityAdmission.evaluate(
+                state = "shop",
+                primaryControl = true,
+                independentControl = false,
+                gameplayControl = hasGameplayHudControl(screenshot)
+                    ?: return StateObservation("unknown", neutralIdentity("unknown")),
+            )
+            val published = MenuIdentityAdmission.publicState(identity)
+            if (published == "shop") {
+                PylaLog.p(TAG, "State: shop (${identity.level})")
+            } else {
+                PylaLog.w(TAG, "shop evidence rejected (${identity.level}: ${identity.reason})")
+            }
+            return StateObservation(published, identity)
+        }
+        if (inOfferPopup(screenshot)) { PylaLog.p(TAG, "State: popup"); return StateObservation("popup", neutralIdentity("popup")) }
+        if (inBrawlPass(screenshot) || inStarRoad(screenshot)) {
+            PylaLog.p(TAG, "State: shop (brawl_pass/star_road)")
+            // These two screens carry their own configured control template, so their identity is
+            // not ambiguous and needs no corroboration.
+            return StateObservation("shop", MenuIdentityAdmission.confirmedByOwnControl("shop", "brawl_pass_or_star_road"))
+        }
         PylaLog.p(TAG, "State: unknown (no positive menu evidence)")
-        return "unknown"
+        return StateObservation("unknown", neutralIdentity("unknown"))
     }
 }

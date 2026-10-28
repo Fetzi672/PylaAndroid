@@ -16,7 +16,9 @@ class PylaApp : Application() {
         try {
             val ok = OpenCVLoader.initLocal()
             Log.i("Pyla", "OpenCV initLocal: $ok")
+            if (!ok) DiagnosticLog.failure("app", "opencv_init", "init_returned_false")
         } catch (t: Throwable) {
+            DiagnosticLog.failure("app", "opencv_init", "init_exception", t)
             Log.e(TAG, "OpenCV init failed", t)
         }
     }

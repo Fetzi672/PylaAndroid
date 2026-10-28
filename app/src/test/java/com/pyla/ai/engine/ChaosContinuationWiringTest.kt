@@ -25,8 +25,11 @@ class ChaosContinuationWiringTest {
     }
     @Test fun enginePassesGenerationAndActualCaptureTime() {
         val e = source("BotEngine")
-        assertTrue(e.contains("StateFinder.getState(mat, chaosGeneration, copied.capturedAtMs)"))
-        assertTrue(e.contains("StateFinder.getState(currentMat, chaosGeneration, frame.capturedAtMs)"))
+        assertTrue(e.contains("classifyAdmitted(mat, chaosGeneration, copied.capturedAtMs)"))
+        assertTrue(e.contains("classifyAdmitted(currentMat, chaosGeneration, frame.capturedAtMs)"))
+        val wrapper = method(e, "private fun classifyAdmitted(", "private lateinit var windowController")
+        assertTrue(wrapper.contains("StateFinder.getStateObservation(mat, chaosGeneration, capturedAtMs)"))
+        assertFalse(wrapper.contains("capturedAtMs = SystemClock"))
         assertTrue(e.indexOf("val chaosGeneration = PhoneVisualCues.chaosObservationGeneration()") <
             e.indexOf("val copied = capture.copyLatestFrame(stateFrameBuffer)"))
     }
@@ -46,7 +49,7 @@ class ChaosContinuationWiringTest {
         assertTrue(source("LobbyAutomation").contains("StateFinder.getState(mat, chaosGeneration, frame.capturedAtMs)"))
         val p = source("Play")
         assertTrue(p.contains("classificationCapturedAtMs = capturedAtMs"))
-        assertTrue(p.contains("StateFinder.getState(it, classificationGeneration, classificationCapturedAtMs)"))
+        assertTrue(p.contains("StateFinder.getStateObservation(it, classificationGeneration, classificationCapturedAtMs)"))
     }
     @Test fun lifecycleRevocationIsAtomicWithTheOwnerCheck() {
         val engine = source("BotEngine")

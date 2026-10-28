@@ -40,9 +40,6 @@ class LobbyAutomation(
     private var gridOcrBitmap: Bitmap? = null
     private var lobbyReturnBitmap: Bitmap? = null
     private val lobbyReturnOcrReuse = BrawlerLobbyReturnGate.OcrReuse()
-    // Run-local: only an admitted page followed by our own authorised swipe can enable this.
-    // Neither a failed initial admission nor a previous selection run can grant continuity.
-    private var gridPagingContinuation = false
     private val scalePaint = Paint(Paint.FILTER_BITMAP_FLAG)
     private val ocrScaleDownFactor: Double get() =
         PylaConfig.load("cfg/general_config.toml")
@@ -61,6 +58,7 @@ class LobbyAutomation(
             }
             out
         } catch (t: Throwable) {
+            DiagnosticLog.failure("config", "names", "json_unreadable", t)
             Log.w(TAG, "names.json load failed: ${t.message}")
             emptyMap()
         }
@@ -120,8 +118,9 @@ class LobbyAutomation(
     // planned pixel heights, instead of the whole frame at one scale. Entry/detail/lobby keep their
     // configured scale and every identity/freshness/geometry gate is unchanged.
     private fun extractGridTextAndPositions(frame: FrameSnapshot, timeoutMs: Long = 15_000L): BrawlerOcrScan {
-        val plan = (if (gridPagingContinuation) BrawlerGridOcrRegions.pagingPlan(frame.width, frame.height)
-            else BrawlerGridOcrRegions.plan(frame.width, frame.height))
+        // Never append controls to the name mosaic: native ML Kit can change Nori's reading
+        // when a fifth tile is appended. Fixed chrome is observed separately only when needed.
+        val plan = BrawlerGridOcrRegions.plan(frame.width, frame.height)
             ?: return extractTextAndPositionsAtScale(frame, timeoutMs, 1.0)
 
         val oldSource = sourceBitmap
@@ -433,13 +432,27 @@ class LobbyAutomation(
         return changed <= 20 && totalDifference <= 400L * 9L
     }
 
-    private fun stableFrame(notBefore: Long, region: ScanRegion, deadline: Long): FrameSnapshot? {
+    private fun gridScan(frame: FrameSnapshot, deadline: Long): BrawlerOcrScan? = try {
+        extractGridTextAndPositions(frame, minOf(2_000L, (deadline - selectionClock()).coerceAtLeast(1L)))
+    } catch (_: InterruptedException) {
+        Thread.currentThread().interrupt()
+        null
+    } catch (t: Exception) {
+        DiagnosticLog.event("selection.search", "reason=grid_ocr_retry")
+        DiagnosticLog.failure("selection", "grid_ocr", "ocr_exception", t)
+        null
+    }
+
+    private fun stableFrame(notBefore: Long, region: ScanRegion, deadline: Long,
+        listSession: BrawlerListSearchSession? = null): FrameSnapshot? {
         var previous: FrameSnapshot? = null
         while (allowed(deadline)) {
             val frame = freshFrame()
             if (frame != null && frame.capturedAtMs >= notBefore) {
                 val prior = previous
-                if (prior != null && frame.capturedAtMs > prior.capturedAtMs && pixelsStill(prior, frame, region)) return frame
+                if (prior != null && frame.capturedAtMs > prior.capturedAtMs &&
+                    ((region == ScanRegion.GRID && listSession?.confirms(prior, frame, selectionClock()) == true) ||
+                        pixelsStill(prior, frame, region))) return frame
                 if (prior == null || frame.capturedAtMs > prior.capturedAtMs) previous = frame
             }
             if (!waitStep(SCAN_INTERVAL_MS, deadline)) break
@@ -447,25 +460,27 @@ class LobbyAutomation(
         return null
     }
 
-    private fun settledPair(notBefore: Long, region: ScanRegion, deadline: Long): ScanPair? {
+    private fun settledPair(notBefore: Long, region: ScanRegion, deadline: Long,
+        listSession: BrawlerListSearchSession? = null): ScanPair? {
         for (attempt in 0 until 3) {
-            val firstFrame = stableFrame(notBefore, region, deadline) ?: return null
+            val firstFrame = stableFrame(notBefore, region, deadline, listSession) ?: return null
             val first = if (region == ScanRegion.GRID) {
-                extractGridTextAndPositions(firstFrame, minOf(15_000L, (deadline - selectionClock()).coerceAtLeast(1L)))
+                gridScan(firstFrame, deadline) ?: continue
             } else if (region == ScanRegion.DETAIL) {
                 extractDetailTextAndPositions(firstFrame, minOf(15_000L, (deadline - selectionClock()).coerceAtLeast(1L)))
             } else extractTextAndPositions(firstFrame)
             if (!waitStep(SCAN_INTERVAL_MS, deadline)) return null
-            val secondFrame = stableFrame(firstFrame.capturedAtMs + SCAN_INTERVAL_MS, region, deadline) ?: return null
+            val secondFrame = stableFrame(firstFrame.capturedAtMs + SCAN_INTERVAL_MS, region, deadline, listSession) ?: return null
             val second = if (region == ScanRegion.GRID) {
-                extractGridTextAndPositions(secondFrame, minOf(15_000L, (deadline - selectionClock()).coerceAtLeast(1L)))
+                gridScan(secondFrame, deadline) ?: continue
             } else if (region == ScanRegion.DETAIL) {
                 extractDetailTextAndPositions(secondFrame, minOf(15_000L, (deadline - selectionClock()).coerceAtLeast(1L)))
             } else extractTextAndPositions(secondFrame)
             val now = selectionClock()
             if (allowed(deadline) && second.capturedAtMs > first.capturedAtMs &&
                 now - first.capturedAtMs <= FRAME_MAX_AGE_MS && now - second.capturedAtMs <= FRAME_MAX_AGE_MS &&
-                pixelsStill(firstFrame, secondFrame, region)) return ScanPair(firstFrame, secondFrame, first, second)
+                ((region == ScanRegion.GRID && listSession?.confirms(firstFrame, secondFrame, now) == true) ||
+                    pixelsStill(firstFrame, secondFrame, region))) return ScanPair(firstFrame, secondFrame, first, second)
         }
         return null
     }
@@ -504,11 +519,10 @@ class LobbyAutomation(
         val header = BrawlerSelectionGate.uniqueMatch(headerScan, BRAWLERS_MENU_LABELS, 0.0, GRID_TOP) != null
             known >= 2 && (stateOf(frame) == "brawler_selection" || header)
         }
-        if (originalIdentity) return true
-        // A sort label alone, a previous page alone or aspect ratio alone never admits a list.
-        // Only our own earlier admitted paging request enables the stronger three-row proof.
-        return gridPagingContinuation && BrawlerGridContinuation.confirm(
-            pair.first, pair.second, knownMenuNames, selectionClock())
+        // Initial/cold identity stays strict. A previously admitted list continues only through
+        // the ORIGINAL run-local visual binding in admitGrid; fresh contrast in an arbitrary new
+        // control region must never re-anchor an unknown/foreign screen from three names alone.
+        return originalIdentity
     }
 
     private fun confirmed(pair: ScanPair, names: Set<String>, top: Double, bottom: Double): BrawlerOcrHit? =
@@ -611,7 +625,8 @@ class LobbyAutomation(
         } catch (_: InterruptedException) {
             Thread.currentThread().interrupt()
             null
-        } catch (_: java.util.concurrent.TimeoutException) {
+        } catch (t: java.util.concurrent.TimeoutException) {
+            DiagnosticLog.failure("selection", "detail_ocr", "ocr_timeout", t)
             null
         }
     }
@@ -733,6 +748,14 @@ class LobbyAutomation(
         region: ScanRegion,
         deadline: Long,
         windows: List<LobbyMenuEntryGate.Bounds>? = null,
+    ): LiveReason? = inspectLiveDenial(pair, region, deadline, windows, null)
+
+    private fun inspectLiveDenial(
+        pair: ScanPair,
+        region: ScanRegion,
+        deadline: Long,
+        windows: List<LobbyMenuEntryGate.Bounds>?,
+        listSession: BrawlerListSearchSession?,
     ): LiveReason? {
         if (!selectionAllowed()) return LiveReason.AUTHORITY_WITHDRAWN
         if (Thread.currentThread().isInterrupted) return LiveReason.INTERRUPTED
@@ -751,10 +774,14 @@ class LobbyAutomation(
         if (selectionClock() - pair.first.capturedAtMs > FRAME_MAX_AGE_MS) return LiveReason.FIRST_PAIR_EXPIRED
         // DETAIL supplies the confirmed title/SELECT control windows, so continuous animation
         // elsewhere on the detail screen is ignored while a moved or covered control still fails.
-        val stable = if (windows != null) {
-            BrawlerDetailStability.controlsStill(pair.secondFrame, live, windows)
-        } else {
-            pixelsStill(pair.secondFrame, live, region)
+        // GRID supplies ONLY the confirmed target card label window: the list around it animates.
+        val stable = when {
+            region == ScanRegion.GRID && listSession != null ->
+                listSession.matches(pair.secondFrame, now) && listSession.matches(live, now)
+            windows == null -> pixelsStill(pair.secondFrame, live, region)
+            region == ScanRegion.GRID ->
+                BrawlerGridTargetStability.targetStill(pair.secondFrame, live, windows)
+            else -> BrawlerDetailStability.controlsStill(pair.secondFrame, live, windows)
         }
         if (!stable) return LiveReason.PIXELS_CHANGED
         // Copying and pixel inspection consume time; do not grant from a pre-inspection clock.
@@ -793,6 +820,22 @@ class LobbyAutomation(
         return after // Preserve terminal authority/deadline causes after logger latency.
     }
 
+    /** Navigation only: card clicks keep the original exact target-bound liveGate. */
+    private fun listScrollGate(pair: ScanPair, deadline: Long,
+        listSession: BrawlerListSearchSession?): LiveReason? {
+        if (listSession == null) return liveGate(pair, ScanRegion.GRID, deadline)
+        val denial = inspectLiveDenial(pair, ScanRegion.GRID, deadline, null, listSession)
+        if (denial != null) {
+            noteLive(ScanRegion.GRID, denial)
+            return denial
+        }
+        noteLive(ScanRegion.GRID, LiveReason.AUTHORISED)
+        val after = inspectLiveDenial(pair, ScanRegion.GRID, deadline, null, listSession) ?: return null
+        noteLive(ScanRegion.GRID, after)
+        noteLive(ScanRegion.GRID, LiveReason.DENIED_AFTER_TELEMETRY)
+        return after
+    }
+
     /**
      * Authority and deadline denials end the run by choice or by timeout and are never recovery.
      * Only missing live EVIDENCE is retryable, and only inside the current page's existing budget.
@@ -808,6 +851,7 @@ class LobbyAutomation(
      */
     private enum class GridReason(val token: String) {
         ADMITTED("grid_admitted"),
+        SESSION_CONFIRMED("grid_session_confirmed"),
         PAIR_UNSETTLED("grid_pair_unsettled"),
         IDENTITY_INCOMPLETE("grid_identity_incomplete"),
         FRESHNESS_REJECTED("grid_freshness_rejected"),
@@ -851,6 +895,12 @@ class LobbyAutomation(
             "selection.phase.${region.name.lowercase(java.util.Locale.ROOT)}",
             "reason=$reason outcome=$result",
         )
+        return result
+    }
+
+    /** Pre-claim guard terminal: exactly one line, fixed codes only, never folded. */
+    private fun selectTerminal(result: String, reason: String): String {
+        DiagnosticLog.terminal("selection", "select", result, reason)
         return result
     }
 
@@ -1018,7 +1068,8 @@ class LobbyAutomation(
         return false
     }
 
-    private data class GridAdmission(val pair: ScanPair?, val reason: GridReason)
+    private data class GridAdmission(val pair: ScanPair?, val reason: GridReason,
+        val strongIdentity: Boolean = false)
 
     /** True while this admitted pair is still new enough to act on. */
     private fun pairStillFresh(pair: ScanPair): Boolean =
@@ -1038,7 +1089,8 @@ class LobbyAutomation(
      * conflicting target. Recovery never renews the 15 s page deadline or the finite overall
      * selection deadline; only an authorized paging request starts a new page budget.
      */
-    private fun admitGrid(notBefore: Long, phaseDeadline: Long, deadline: Long): GridAdmission {
+    private fun admitGrid(notBefore: Long, phaseDeadline: Long, deadline: Long,
+        listSession: BrawlerListSearchSession? = null): GridAdmission {
         var next = notBefore
         var attempt = 0
         while (true) {
@@ -1056,7 +1108,7 @@ class LobbyAutomation(
             }
             attempt++
             BotStatus.publish(RuntimeState.UNKNOWN, VerificationPhase.VERIFY_GRID, false)
-            val pair = settledPair(next, ScanRegion.GRID, phaseDeadline)
+            val pair = settledPair(next, ScanRegion.GRID, phaseDeadline, listSession)
             if (pair == null) {
                 noteGrid(GridReason.PAIR_UNSETTLED)
                 // The rescan stopped because the run was cancelled, not because time ran out.
@@ -1078,7 +1130,10 @@ class LobbyAutomation(
                 next = pair.second.capturedAtMs + SCAN_INTERVAL_MS
                 continue
             }
-            val gridReady = inGrid(pair)
+            val continued = listSession?.confirms(pair.firstFrame, pair.secondFrame, selectionClock()) == true
+            // No sort-caption OCR is observed or required here: the caption never decides a page.
+            val strongIdentity = !continued && inGrid(pair)
+            val gridReady = continued || strongIdentity
             // Verifying identity consumed part of the budget, so freshness is re-checked AFTER it:
             // a pair admitted on stale evidence must be rescanned, never acted on.
             if (!pairStillFresh(pair)) {
@@ -1091,9 +1146,10 @@ class LobbyAutomation(
                 next = pair.second.capturedAtMs + SCAN_INTERVAL_MS
                 continue
             }
-            noteGrid(GridReason.ADMITTED)
+            val reason = if (continued) GridReason.SESSION_CONFIRMED else GridReason.ADMITTED
+            noteGrid(reason)
             BotStatus.publish(RuntimeState.BRAWLER_LIST, VerificationPhase.VERIFY_GRID, true)
-            return GridAdmission(pair, GridReason.ADMITTED)
+            return GridAdmission(pair, reason, strongIdentity)
         }
     }
 
@@ -1103,7 +1159,11 @@ class LobbyAutomation(
         fun note(reason: String) = DiagnosticLog.event("selection.entry", "reason=$reason")
         fun retry(reason: String): Boolean {
             note(reason)
-            return waitStep(SCAN_INTERVAL_MS, entryDeadline)
+            val more = waitStep(SCAN_INTERVAL_MS, entryDeadline)
+            // A denied retry is the entry gate's exhaustion boundary, never a silent break.
+            // [reason] is a fixed literal vocabulary; no OCR, coordinates or timings.
+            if (!more) DiagnosticLog.failure("entry", "brawler_menu", "retry_denied_$reason")
+            return more
         }
         fun current(frame: FrameSnapshot): Boolean {
             if (!allowed(entryDeadline)) return false
@@ -1117,7 +1177,10 @@ class LobbyAutomation(
         } catch (_: InterruptedException) {
             Thread.currentThread().interrupt()
             null
-        } catch (_: Exception) { null }
+        } catch (t: Exception) {
+            DiagnosticLog.failure("entry", "brawler_menu", "menu_ocr_exception", t)
+            null
+        }
         fun observe(scan: BrawlerOcrScan) {
             // Invalid or ambiguous label evidence must not be turned into coordinate permission.
             if (scan.hits.any { cleanName(it.text) in BRAWLERS_MENU_LABELS }) sawMenuLabel = true
@@ -1212,15 +1275,31 @@ class LobbyAutomation(
             windowController.click(x, y)
             return true // One request only; the unchanged downstream pair must prove the actual list.
         }
-        note(if (!selectionAllowed() || Thread.currentThread().isInterrupted) "entry_cancelled" else "entry_timeout")
+        // No additional authority/clock invocation merely to classify a diagnostic.
+        val entryStop = "entry_unconfirmed"
+        note(entryStop)
+        DiagnosticLog.failure("entry", "brawler_menu", entryStop)
         return false
     }
 
     fun selectBrawler(brawler: String): String {
-        gridPagingContinuation = false
         val target = cleanName(brawler)
         val deadline = selectionClock() + SELECTION_TIMEOUT_MS
-        if (target.isEmpty() || !allowed(deadline)) return "error"
+        // Exactly one never-folded terminal line per invocation, including these pre-claim guards.
+        if (target.isEmpty()) return selectTerminal("error", "target_name_empty")
+        if (!allowed(deadline)) return selectTerminal("error", "selection_not_allowed")
+        var terminalResult = "error"
+        var terminalReason = "not_started"
+        fun finish(result: String, reason: String): String {
+            terminalResult = result
+            terminalReason = reason
+            return result
+        }
+        fun phase(result: String, region: ScanRegion, reason: String): String {
+            terminalResult = result
+            terminalReason = reason
+            return notePhaseTerminal(result, region, reason)
+        }
         // The selector owns stronger OCR state evidence for its whole bounded phase, so the
         // background classifier cannot overwrite it. The claim is taken BEFORE the first status
         // publication, and released in finally on every exit path.
@@ -1231,23 +1310,58 @@ class LobbyAutomation(
             selectionWidth = initial.width; selectionHeight = initial.height
             val names = targetNames(target)
             BotStatus.publish(RuntimeState.UNKNOWN, VerificationPhase.OPEN_MENU, false)
-            if (names.isEmpty() || !openBrawlerMenu(deadline)) return "stuck"
+            if (names.isEmpty()) return finish("stuck", "target_name_unresolved")
+            if (!openBrawlerMenu(deadline)) return finish("stuck", "menu_entry_unconfirmed")
             var notBefore = selectionClock() + OPEN_SETTLE_MS
             var page = 0
+            var listSession: BrawlerListSearchSession? = null
+            var emptyNameRetries = 0
             var phaseDeadline = minOf(deadline, selectionClock() + PHASE_TIMEOUT_MS)
             // Scan the initial page AND the page reached by the final permitted swipe.
             // The gesture cap limits requests, not the number of admitted pages we can inspect.
             while (page <= MAX_SCROLL_PAGES) {
-                val admission = admitGrid(notBefore, phaseDeadline, deadline)
-                val grid = admission.pair ?: return "stuck"
+                val admission = admitGrid(notBefore, phaseDeadline, deadline, listSession)
+                val admitted = admission.pair
+                if (admitted == null) return finish("stuck", admission.reason.token)
+                val grid: ScanPair = admitted
+                if (admission.strongIdentity) {
+                    // Passive observer: names the real predicate behind a null session, adds nothing.
+                    var sessionRejection: BrawlerListSearchSession.Rejection? = null
+                    val sessionObserver = BrawlerListSearchSession.CaptureObserver {
+                        sessionRejection = it
+                    }
+                    listSession = BrawlerListSearchSession.capture(grid.firstFrame, grid.secondFrame,
+                        grid.first, grid.second, selectionClock(), initialListConfirmed = true,
+                        observer = sessionObserver)
+                    if (!allowed(phaseDeadline)) {
+                        DiagnosticLog.failure("selection", "list_session", "phase_not_allowed")
+                        notBefore = selectionClock() + SCAN_INTERVAL_MS
+                        continue
+                    }
+                    if (!pairStillFresh(grid)) {
+                        DiagnosticLog.failure("selection", "list_session", "pair_stale_after_admission")
+                        notBefore = selectionClock() + SCAN_INTERVAL_MS
+                        continue
+                    }
+                    DiagnosticLog.event("selection.search", if (listSession != null)
+                        "reason=list_session_started" else "reason=list_session_unavailable")
+                    // The concrete existing rejection code, never the generic channel name alone.
+                    if (listSession == null) DiagnosticLog.failure("selection", "list_session",
+                        sessionRejection?.code ?: "list_session_unobserved")
+                }
                 BotStatus.publish(RuntimeState.BRAWLER_LIST, VerificationPhase.SCAN_NAMES, true)
                 val hit = confirmed(grid, names, GRID_TOP, GRID_BOTTOM)
                 if (hit != null) {
                     // Status/diagnostics precede the last live check, not the input it authorises.
                     BotStatus.publish(RuntimeState.UNKNOWN, VerificationPhase.VERIFY_DETAIL, false)
-                    val denial = liveGate(grid, ScanRegion.GRID, phaseDeadline)
+                    // The pre-tap live evidence is bound to the OBSERVED target card only: the list
+                    // around it animates (right preview, banner), this label does not. An unlocalisable
+                    // target box yields no window, and the gate then keeps the stricter whole-area rule.
+                    val targetWindows = BrawlerGridTargetStability.windows(
+                        grid.second.width, grid.second.height, hit)
+                    val denial = liveGate(grid, ScanRegion.GRID, phaseDeadline, targetWindows)
                     if (denial != null) {
-                        if (liveTerminal(denial)) return "stuck"
+                        if (liveTerminal(denial)) return finish("stuck", denial.token)
                         // No page/gesture/deadline is consumed or renewed. Both retained captures
                         // are discarded; the next iteration must admit and match an entirely new pair.
                         notBefore = maxOf(selectionClock(), grid.second.capturedAtMs) + SCAN_INTERVAL_MS
@@ -1259,9 +1373,9 @@ class LobbyAutomation(
                     val detailDeadline = minOf(deadline, selectionClock() + PHASE_TIMEOUT_MS)
                     val select = when (val detail = confirmDetailSelect(names, deadline, detailDeadline)) {
                         is DetailConfirm.Selected -> detail.hit
-                        DetailConfirm.Unsettled -> return notePhaseTerminal("stuck", ScanRegion.DETAIL, "detail_pair_unsettled")
-                        DetailConfirm.Rejected -> return notePhaseTerminal("failed", ScanRegion.DETAIL, "detail_identity_incomplete")
-                        DetailConfirm.Denied -> return "failed"
+                        DetailConfirm.Unsettled -> return phase("stuck", ScanRegion.DETAIL, "detail_pair_unsettled")
+                        DetailConfirm.Rejected -> return phase("failed", ScanRegion.DETAIL, "detail_identity_incomplete")
+                        DetailConfirm.Denied -> return finish("failed", "detail_denied")
                     }
                     windowController.click(select.centerX.toFloat(), select.centerY.toFloat())
                     BotStatus.publish(RuntimeState.UNKNOWN, VerificationPhase.VERIFY_SELECTION, false)
@@ -1270,12 +1384,12 @@ class LobbyAutomation(
                     // observed twice. It never taps PLAY or SELECT; StageManager still starts the
                     // match after an unchanged success result.
                     if (!verifyLobbyReturn(selectionClock() + OPEN_SETTLE_MS, deadline)) {
-                        return notePhaseTerminal("stuck", ScanRegion.LOBBY, "lobby_return_unconfirmed")
+                        return phase("stuck", ScanRegion.LOBBY, "lobby_return_unconfirmed")
                     }
                     BotStatus.publish(RuntimeState.LOBBY, VerificationPhase.VERIFIED, true)
                     BotStatus.action("Verified selected brawler: $target")
                     Log.i(TAG, "Brawler selection identity verified")
-                    return "success"
+                    return finish("success", "selection_verified")
                 }
                 // A visible but conflicting/duplicate/moving target must be rescanned, never clicked or skipped.
                 val visibleTarget = (grid.first.hits + grid.second.hits).any {
@@ -1283,7 +1397,22 @@ class LobbyAutomation(
                 }
                 if (visibleTarget) {
                     // Bounded inside the SAME page verification budget: rescan only, no click, no skip.
-                    if (selectionClock() >= phaseDeadline) return "stuck"
+                    if (selectionClock() >= phaseDeadline) {
+                        DiagnosticLog.failure("selection", "scan", "phase_timeout")
+                        return finish("stuck", "phase_timeout")
+                    }
+                    notBefore = maxOf(selectionClock(), grid.second.capturedAtMs) + SCAN_INTERVAL_MS
+                    continue
+                }
+                // Retry empty OCR on this SAME page before moving on. Missing names do not revoke
+                // fresh fixed-list-control evidence, and retries never renew the page deadline.
+                val anyKnownName = (grid.first.hits + grid.second.hits).any {
+                    it.top >= grid.second.height * GRID_TOP && it.bottom <= grid.second.height * GRID_BOTTOM &&
+                        cleanName(it.text) in knownMenuNames
+                }
+                if (!anyKnownName && listSession != null && emptyNameRetries < 2) {
+                    emptyNameRetries++
+                    DiagnosticLog.event("selection.search", "reason=empty_names_retry")
                     notBefore = maxOf(selectionClock(), grid.second.capturedAtMs) + SCAN_INTERVAL_MS
                     continue
                 }
@@ -1296,9 +1425,9 @@ class LobbyAutomation(
                 val left = grid.second.width * 0.60f
                 val row = grid.second.height * 0.55f
                 BotStatus.publish(RuntimeState.BRAWLER_LIST, VerificationPhase.SCROLL_GRID, true)
-                val swipeDenial = liveGate(grid, ScanRegion.GRID, phaseDeadline)
+                val swipeDenial = listScrollGate(grid, phaseDeadline, listSession)
                 if (swipeDenial != null) {
-                    if (liveTerminal(swipeDenial)) return "stuck"
+                    if (liveTerminal(swipeDenial)) return finish("stuck", swipeDenial.token)
                     notBefore = maxOf(selectionClock(), grid.second.capturedAtMs) + SCAN_INTERVAL_MS
                     BotStatus.publish(RuntimeState.UNKNOWN, VerificationPhase.VERIFY_GRID, false)
                     continue
@@ -1306,27 +1435,29 @@ class LobbyAutomation(
                 // User-confirmed layout: further columns are to the right. Drag right -> left;
                 // both endpoints share exactly the same y, and the next page requires fresh scans.
                 windowController.swipe(right, row, left, row, SCROLL_DURATION_MS)
-                gridPagingContinuation = true
                 page++ // Count only actual paging requests, never denied checks or conflict rescans.
+                emptyNameRetries = 0
                 notBefore = selectionClock() + SCROLL_DURATION_MS + SCROLL_SETTLE_MS
                 phaseDeadline = minOf(deadline, selectionClock() + PHASE_TIMEOUT_MS)
             }
             BotStatus.publish(RuntimeState.UNKNOWN, VerificationPhase.TIMEOUT, false)
-            "failed"
-        } catch (_: Throwable) {
-            // No raw OCR, frame content or device details in diagnostics.
+            finish("failed", "page_exhausted")
+        } catch (t: Throwable) {
+            // No raw OCR, frame content or device details in diagnostics: only the exception TYPE.
             Log.w(TAG, "Brawler selection aborted: scan or capture unavailable")
-            "error"
+            DiagnosticLog.failure("selection", "select", "unexpected_exception", t)
+            finish("error", "unexpected_exception")
         } finally {
             // Always release the selector's claim, even on the success and error exits.
-            gridPagingContinuation = false
             BotStatus.selectionActive = false
+            // One unambiguous, never-folded terminal per invocation; nonthrowing by construction.
+            try { DiagnosticLog.terminal("selection", "select", terminalResult, terminalReason) }
+            catch (_: Throwable) { }
         }
     }
 
     fun close() {
         lobbyReturnOcrReuse.clear()
-        gridPagingContinuation = false
         if (recognizerDelegate.isInitialized()) {
             try { recognizerDelegate.value.close() } catch (_: Throwable) {}
         }

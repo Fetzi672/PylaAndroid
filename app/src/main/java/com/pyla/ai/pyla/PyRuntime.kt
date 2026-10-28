@@ -48,6 +48,28 @@ class PyRuntimeError(message: String) : RuntimeException(message)
 
 object Py {
 
+    // ---------- allocation bounds ----------
+    //
+    // Every eager allocation the runtime exposes to script code (range/list/tuple/dict creation,
+    // string and sequence repetition, concatenation, slicing, iteration copies) is charged against
+    // the active run budget *before* the JVM allocates, so no counted statement can hide an
+    // unbounded native allocation. Outside a bounded run the checks collapse to a sanity ceiling.
+
+    private const val HARD_ALLOC_CEILING = 16_777_216L
+
+    private fun guardAlloc(elements: Long) {
+        if (elements <= 0L) return
+        val b = PyBudgetContext.current()
+        if (b != null) b.charge(elements) else if (elements > HARD_ALLOC_CEILING)
+            throw PyBudgetExceededException(PyBudgetKind.COLLECTION)
+    }
+
+    private fun guardContainerSize(size: Long) {
+        val b = PyBudgetContext.current()
+        if (b != null) b.guardSize(size) else if (size > HARD_ALLOC_CEILING)
+            throw PyBudgetExceededException(PyBudgetKind.COLLECTION)
+    }
+
     fun truthy(v: Any): Boolean = when (v) {
         is PyNone -> false
         is Boolean -> v
@@ -172,9 +194,18 @@ object Py {
     fun binaryOp(op: String, a: Any, b: Any): Any {
         when (op) {
             "+" -> {
-                if (a is String && b is String) return a + b
-                if (a is PyList && b is PyList) return PyList((a.items + b.items).toMutableList())
-                if (a is PyTuple && b is PyTuple) return PyTuple(a.items + b.items)
+                if (a is String && b is String) {
+                    guardAlloc(a.length.toLong() + b.length)
+                    return a + b
+                }
+                if (a is PyList && b is PyList) {
+                    guardAlloc(a.items.size.toLong() + b.items.size)
+                    return PyList((a.items + b.items).toMutableList())
+                }
+                if (a is PyTuple && b is PyTuple) {
+                    guardAlloc(a.items.size.toLong() + b.items.size)
+                    return PyTuple(a.items + b.items)
+                }
                 requireNums(op, a, b)
                 return if (bothLong(a, b)) toLong(a) + toLong(b) else toDouble(a) + toDouble(b)
             }
@@ -183,10 +214,10 @@ object Py {
                 return if (bothLong(a, b)) toLong(a) - toLong(b) else toDouble(a) - toDouble(b)
             }
             "*" -> {
-                if (a is String && b is Long) return a.repeat(maxOf(0, b.toInt()))
-                if (a is Long && b is String) return b.repeat(maxOf(0, a.toInt()))
-                if (a is PyList && b is Long) return PyList(repeatList(a.items, b.toInt()))
-                if (a is Long && b is PyList) return PyList(repeatList(b.items, a.toInt()))
+                if (a is String && b is Long) return repeatString(a, b)
+                if (a is Long && b is String) return repeatString(b, a)
+                if (a is PyList && b is Long) return PyList(repeatList(a.items, b))
+                if (a is Long && b is PyList) return PyList(repeatList(b.items, a))
                 requireNums(op, a, b)
                 return if (bothLong(a, b)) toLong(a) * toLong(b) else toDouble(a) * toDouble(b)
             }
@@ -263,9 +294,23 @@ object Py {
         return sb.toString()
     }
 
-    private fun repeatList(items: List<Any>, n: Int): MutableList<Any> {
-        val out = ArrayList<Any>()
-        repeat(maxOf(0, n)) { out.addAll(items) }
+    private fun repeatString(s: String, times: Long): String {
+        val n = if (times <= 0L) 0 else if (times > Int.MAX_VALUE) Int.MAX_VALUE else times.toInt()
+        if (n == 0 || s.isEmpty()) return ""
+        val total = s.length.toLong() * n.toLong()
+        // Bounded before the allocation happens: huge repetition must never reach String.repeat.
+        guardAlloc(total)
+        return s.repeat(n)
+    }
+
+    private fun repeatList(items: List<Any>, times: Long): MutableList<Any> {
+        val n = if (times <= 0L) 0 else if (times > Int.MAX_VALUE) Int.MAX_VALUE else times.toInt()
+        if (n == 0 || items.isEmpty()) return ArrayList()
+        val total = items.size.toLong() * n.toLong()
+        guardContainerSize(total)
+        guardAlloc(total)
+        val out = ArrayList<Any>(if (total <= Int.MAX_VALUE) total.toInt() else 0)
+        repeat(n) { out.addAll(items) }
         return out
     }
 
@@ -288,10 +333,10 @@ object Py {
     }
 
     fun iterate(v: Any): List<Any> = when (v) {
-        is PyList -> ArrayList(v.items)
+        is PyList -> { guardAlloc(v.items.size.toLong()); ArrayList(v.items) }
         is PyTuple -> v.items
-        is PyDict -> ArrayList(v.map.keys)
-        is String -> v.map { it.toString() as Any }
+        is PyDict -> { guardAlloc(v.map.size.toLong()); ArrayList(v.map.keys) }
+        is String -> { guardAlloc(v.length.toLong()); v.map { it.toString() as Any } }
         else -> throw PyRuntimeError("'${typeName(v)}' object is not iterable")
     }
 
@@ -333,7 +378,11 @@ object Py {
             is PyDict -> {
                 // replace existing key by value-equality, else insert
                 val existing = container.map.keys.firstOrNull { eq(it, index) }
-                if (existing != null) container.map[existing] = value else container.map[index] = value
+                if (existing != null) container.map[existing] = value
+                else {
+                    guardContainerSize(container.map.size.toLong() + 1L)
+                    container.map[index] = value
+                }
             }
             else -> throw PyRuntimeError("'${typeName(container)}' object does not support item assignment")
         }
@@ -358,6 +407,14 @@ object Py {
             stop = if (upper == null || upper is PyNone) -1 else clampSliceNeg(toLong(upper).toInt(), size)
         }
         val result = ArrayList<Any>()
+        val step = st.toLong()
+        val expected: Long = if (step > 0) {
+            if (start >= stop) 0L else (stop.toLong() - start + step - 1) / step
+        } else {
+            val abs = -step
+            if (start <= stop) 0L else (start.toLong() - stop + abs - 1) / abs
+        }
+        guardAlloc(expected)
         if (container is String) {
             val sb = StringBuilder()
             var i = start

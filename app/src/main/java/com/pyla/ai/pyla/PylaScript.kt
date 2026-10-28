@@ -1,7 +1,8 @@
 package com.pyla.ai.pyla
 
 import android.content.Context
-import android.util.Log
+import com.pyla.ai.engine.PylaLog as Log
+import com.pyla.ai.diagnostics.DiagnosticLog
 import com.pyla.ai.config.PylaConfig
 import org.json.JSONArray
 import org.json.JSONObject
@@ -17,6 +18,24 @@ data class PlaystyleMeta(
 ) {
     val displayName: String get() = if (name.isNotBlank()) name else filename.removeSuffix(".pyla")
 }
+
+/** Terminal outcome of one bounded playstyle execution. Fixed set — safe to log or persist. */
+enum class PylaRunStatus { SUCCESS, RUNTIME_ERROR, BUDGET_EXCEEDED, CANCELLED }
+
+/**
+ * Outcome of one bounded run.
+ *
+ * [movement] is the script's `movement` global, and only for [PylaRunStatus.SUCCESS]; `null` means
+ * the key was absent (or the script produced no movement), which is distinct from a failed run
+ * because [status] is never SUCCESS for a failure. A legitimate `PyNone` movement stays non-null.
+ * [steps] and [elapsedNanos] are the budget counters at the moment the run stopped.
+ */
+data class PylaRunResult(
+    val status: PylaRunStatus,
+    val movement: Any?,
+    val steps: Long,
+    val elapsedNanos: Long,
+)
 
 /**
  * A parsed + compiled .pyla playstyle. Mirrors the PC interpret_pyla_code flow: the body is
@@ -45,6 +64,7 @@ class PylaScript(
                 val (metaJson, _) = splitHeader(file.readText())
                 parseMeta(file.name, metaJson)
             } catch (t: Throwable) {
+                DiagnosticLog.failure("playstyle", "metadata_read", "metadata_read_failed", t)
                 PlaystyleMeta(file.name, file.name.removeSuffix(".pyla"), "", listOf("all"), listOf("all"), "")
             }
         }
@@ -76,6 +96,7 @@ class PylaScript(
                     author = o.optString("author", ""),
                 )
             } catch (t: Throwable) {
+                DiagnosticLog.failure("playstyle", "metadata_parse", "metadata_parse_failed", t)
                 PlaystyleMeta(filename, filename.removeSuffix(".pyla"), "", listOf("all"), listOf("all"), "")
             }
         }
@@ -90,24 +111,69 @@ class PylaScript(
 
     /**
      * Executes the script with the given context. Returns the `movement` value
-     * (PyTuple/PyList/PyNone/etc.) or null if the script errored or produced nothing.
+     * (PyTuple/PyList/PyNone/etc.) or null if the script errored, was cancelled, ran out of budget
+     * or produced nothing.
+     *
+     * Compatibility wrapper over [runBounded]: only [PylaRunStatus.SUCCESS] exposes a value.
      */
     fun run(context: Map<String, Any>): Any? {
+        val result = runBounded(context)
+        return if (result.status == PylaRunStatus.SUCCESS) result.movement else null
+    }
+
+    /**
+     * Executes the script under a finite, deterministic execution budget and reports an explicit
+     * outcome instead of collapsing failure into a null movement.
+     *
+     * The budget is armed per call, so two successive runs never share counters, and the active
+     * budget binding is removed from the thread on every exit path (success, script error, budget
+     * stop). [cancelled] is polled at entry, around every native call, periodically during
+     * interpretation and once more after the script completes; thread interruption is treated the
+     * same way. Neither the deadline nor cancellation can be extended by script code.
+     */
+    fun runBounded(
+        context: Map<String, Any>,
+        cancelled: () -> Boolean = { false },
+    ): PylaRunResult = runBoundedWith(context, PyExecutionBudget(cancelled = cancelled))
+
+    /** Budget/clock seam for focused tests. Production callers use [runBounded]. */
+    internal fun runBoundedWith(context: Map<String, Any>, budget: PyExecutionBudget): PylaRunResult {
         val globals = PyInterpreter.buildGlobals(context)
-        val interp = PyInterpreter(globals)
-        return try {
-            interp.execBlock(statements, globals)
-            globals.vars["movement"]
+        val interp = PyInterpreter(globals, budget)
+        var status = PylaRunStatus.SUCCESS
+        var movement: Any? = null
+        try {
+            budget.start()
+            PyBudgetContext.withBudget(budget) {
+                budget.tick() // entry: cancellation / deadline / interruption
+                interp.execBlock(statements, globals)
+                budget.completionCheck() // a cancellation that lands at the end still wins
+                movement = globals.vars["movement"]
+            }
+        } catch (b: PyBudgetExceededException) {
+            status = if (b.kind == PyBudgetKind.CANCELLED) PylaRunStatus.CANCELLED else PylaRunStatus.BUDGET_EXCEEDED
+            DiagnosticLog.failure("playstyle", "execute", "budget_${b.kind.name.lowercase(java.util.Locale.ROOT)}", b)
         } catch (r: PyRaiseException) {
-            Log.w(TAG, "playstyle '${meta.filename}' raised: ${r.value}")
-            null
+            status = PylaRunStatus.RUNTIME_ERROR
+            DiagnosticLog.failure("playstyle", "execute", "script_raise", r)
         } catch (e: PyRuntimeError) {
-            Log.w(TAG, "playstyle '${meta.filename}' runtime error: ${e.message}")
-            null
+            status = PylaRunStatus.RUNTIME_ERROR
+            DiagnosticLog.failure("playstyle", "execute", "runtime_error", e)
         } catch (t: Throwable) {
-            Log.w(TAG, "playstyle '${meta.filename}' failed: ${t.message}")
-            null
+            // Includes anything unexpected escaping a native callback; never inspect its message.
+            status = PylaRunStatus.RUNTIME_ERROR
+            DiagnosticLog.failure("playstyle", "execute", "callback_exception", t)
         }
+        if (status != PylaRunStatus.SUCCESS) {
+            // Fixed status/type only: no script exception value or message may reach the log.
+            runCatching { Log.w(TAG, "playstyle status=${status.name}") }
+        }
+        return PylaRunResult(
+            status = status,
+            movement = if (status == PylaRunStatus.SUCCESS) movement else null,
+            steps = budget.steps,
+            elapsedNanos = budget.elapsedNanos(),
+        )
     }
 }
 
@@ -141,7 +207,8 @@ object PlaystyleRegistry {
                 ?.filter { it.endsWith(".pyla") }
                 ?.toSet() ?: emptySet()
         } catch (t: Throwable) {
-            Log.w(TAG, "could not list bundled playstyles: ${t.message}")
+            DiagnosticLog.failure("playstyle", "registry_list", "bundled_list_failed", t)
+            Log.w(TAG, "could not list bundled playstyles", t)
             emptySet()
         }
 
@@ -150,13 +217,15 @@ object PlaystyleRegistry {
     fun load(filename: String): PylaScript? {
         val file = File(playstylesDir(), filename)
         if (!file.exists()) {
-            Log.w(TAG, "playstyle file not found: $filename")
+            DiagnosticLog.failure("playstyle", "registry_load", "file_missing")
+            Log.w(TAG, "playstyle file not found")
             return null
         }
         return try {
             PylaScript.loadFile(file)
         } catch (t: Throwable) {
-            Log.w(TAG, "failed to compile $filename: ${t.message}")
+            DiagnosticLog.failure("playstyle", "registry_load", "compile_failed", t)
+            Log.w(TAG, "failed to compile playstyle", t)
             null
         }
     }
@@ -170,10 +239,11 @@ object PlaystyleRegistry {
             if (!name.endsWith(".pyla")) name += ".pyla"
             val out = File(playstylesDir(), name)
             out.writeText(content)
-            Log.i(TAG, "imported playstyle: $name")
+            Log.i(TAG, "imported playstyle")
             name
         } catch (t: Throwable) {
-            Log.w(TAG, "import failed for $originalName: ${t.message}")
+            DiagnosticLog.failure("playstyle", "registry_import", "import_failed", t)
+            Log.w(TAG, "playstyle import failed", t)
             null
         }
     }

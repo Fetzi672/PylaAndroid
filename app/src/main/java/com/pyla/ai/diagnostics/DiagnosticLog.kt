@@ -18,6 +18,8 @@ object DiagnosticLog {
     private val entries = ArrayDeque<String>()
     private var bytes = 0
     private var sequence = 0L
+    private var droppedEntries = 0L
+    private var foldedEntries = 0L
     private val startNanos = System.nanoTime()
     private data class Channel(var detail: String, var emittedMs: Long, var suppressed: Long = 0)
     private val channels = LinkedHashMap<String, Channel>(MAX_CHANNELS, 0.75f, true)
@@ -74,6 +76,27 @@ object DiagnosticLog {
         catch (_: Throwable) { }
     }
 
+    /** Fixed workflow failure categories; no Throwable message or stack is retained. */
+    fun failure(kind: String, phase: String, reason: String, throwable: Throwable? = null) {
+        try {
+            val channel = safeText(kind, 32)
+            val safePhase = safeText(phase, 48)
+            val safeReason = safeText(reason, 80)
+            val detail = "phase=$safePhase reason=$safeReason" +
+                if (throwable == null) "" else " exception=${throwableTypes(throwable)}"
+            emit("E|failure.$channel", detail, "failure:$channel:$safePhase:$safeReason", 10_000, true)
+        } catch (_: Throwable) { }
+    }
+
+    /** Workflow completion is never hidden by event folding. Does not imply game-visible effect. */
+    fun terminal(kind: String, phase: String, result: String, reason: String) {
+        try {
+            val channel = safeText(kind, 32)
+            val detail = "phase=${safeText(phase, 48)} result=${safeText(result, 32)} reason=${safeText(reason, 80)}"
+            emit("E|terminal.$channel", detail, "terminal:$channel", 0, true)
+        } catch (_: Throwable) { }
+    }
+
     /** At most one sample per channel per interval, even if numeric details change. */
     fun sample(kind: String, detail: String, intervalMs: Long = 1_000) {
         try { emit("E|${safeText(kind, 48)}", safeText(detail), "sample:${safeText(kind, 48)}", intervalMs.coerceIn(100, 60_000), false) }
@@ -86,6 +109,7 @@ object DiagnosticLog {
             val old = channels[key]
             if (old != null && elapsed - old.emittedMs < interval && (!changes || old.detail == body)) {
                 old.suppressed++
+                foldedEntries++
                 return
             }
             val suppressed = old?.suppressed ?: 0
@@ -97,6 +121,7 @@ object DiagnosticLog {
             bytes += line.toByteArray(Charsets.UTF_8).size + 1
             while (entries.size > MAX_ENTRIES || bytes > MAX_BYTES - HEADER_RESERVE) {
                 bytes -= entries.removeFirst().toByteArray(Charsets.UTF_8).size + 1
+                droppedEntries++
             }
         }
     }
@@ -116,7 +141,9 @@ object DiagnosticLog {
     fun snapshot(): DiagnosticSnapshot {
         val id = UUID.randomUUID().toString()
         val text = synchronized(lock) {
-            "# pyla-diagnostics schema=1\n# report_id=$id\n# entries=${entries.size}\n" + entries.joinToString("\n")
+            "# pyla-diagnostics schema=1\n# report_id=$id\n# entries=${entries.size}\n" +
+                "# diagnostic_revision=flow_logs_v1\n# dropped_entries=$droppedEntries\n# folded_entries=$foldedEntries\n" +
+                entries.joinToString("\n")
         }
         return DiagnosticSnapshot(id, text)
     }
@@ -127,6 +154,7 @@ object DiagnosticLog {
 
     internal fun resetForTesting() = synchronized(lock) {
         entries.clear(); channels.clear(); bytes = 0; sequence = 0
+        droppedEntries = 0; foldedEntries = 0
     }
 
     private val URL = Regex("""(?i)\b[a-z][a-z0-9+.\-]*://\S+""")

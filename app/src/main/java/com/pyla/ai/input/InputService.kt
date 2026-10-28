@@ -1,5 +1,8 @@
 package com.pyla.ai.input
 
+import com.pyla.ai.diagnostics.PipelineTimingTelemetry
+import com.pyla.ai.diagnostics.PipelineTimingTelemetry.Stage
+
 import android.accessibilityservice.AccessibilityService
 import android.accessibilityservice.GestureDescription
 import android.graphics.Path
@@ -20,7 +23,11 @@ class InputService : AccessibilityService() {
         private var denied = false
         fun allows(op: String = "dispatchGate"): Boolean {
             if (!denied) {
-                denied = try { !guard() } catch (_: Throwable) { true }
+                // A throwing guard is still a denial; keep the result and record the cause by op.
+                denied = try { !guard() } catch (t: Throwable) {
+                    DiagnosticLog.failure("input", op, "authority_guard_threw", t)
+                    true
+                }
                 if (denied) DiagnosticLog.event("input.gesture.denied", "op=$op reason=authority")
             }
             return !denied
@@ -29,12 +36,20 @@ class InputService : AccessibilityService() {
 
     private class Channel(val name: String) {
         var authority: Authority? = null
-        fun snapshot() = Snapshot(lastStroke, curX, curY, isDown, wantDown)
+        fun snapshot() = Snapshot(lastStroke, curX, curY, isDown, wantDown, releasePending)
         fun restore(s: Snapshot) {
             lastStroke = s.stroke; curX = s.x; curY = s.y; isDown = s.down; wantDown = s.wanted
+            releasePending = s.releasePending
         }
         data class Snapshot(val stroke: GestureDescription.StrokeDescription?, val x: Float,
-            val y: Float, val down: Boolean, val wanted: Boolean)
+            val y: Float, val down: Boolean, val wanted: Boolean, val releasePending: Boolean)
+        // Latest demand must not erase an explicit UP queued during an in-flight continuation.
+        // The next fresh DOWN is emitted only after that terminal gesture completes.
+        var releasePending = false
+        fun requestRelease() {
+            wantDown = false
+            if (isDown) releasePending = true
+        }
         var lastStroke: GestureDescription.StrokeDescription? = null
         var curX = 0f; var curY = 0f
         var downX = 0f; var downY = 0f
@@ -46,14 +61,27 @@ class InputService : AccessibilityService() {
         // eventually lifts the pointer. Keep pumping while held, independently of whether the bot's
         // logical target changed. The logical re_apply_movement setting is handled by
         // WindowController, just like the PC version.
-        fun needsUpdate(): Boolean = wantDown != isDown || (isDown && wantDown)
-        fun reset() { lastStroke = null; isDown = false }
+        fun needsUpdate(): Boolean = releasePending || wantDown != isDown || (isDown && wantDown)
+        fun reset() { lastStroke = null; isDown = false; releasePending = false }
     }
 
     private val joystickCh = Channel("joystick")
     private val attackCh = Channel("attack")
-    private class Pending(val x1: Float, val y1: Float, val x2: Float, val y2: Float, val durationMs: Long, val authority: Authority? = null, val replayable: Boolean = true)
+    /**
+     * One queued stroke. [channel] is the named combat channel for a guarded replayable combat
+     * tap and stays null for every legacy construction (unguarded tap/swipe, navigation,
+     * non-replayable menu tap), so coalescing can never touch those.
+     */
+    private class Pending(
+        val x1: Float, val y1: Float, val x2: Float, val y2: Float, val durationMs: Long,
+        val authority: Authority? = null, val replayable: Boolean = true, val channel: String? = null,
+    ) {
+        fun policyEntry(): CombatTapQueuePolicy.Entry =
+            CombatTapQueuePolicy.Entry(channel, authority != null, replayable)
+    }
     private val strokeQueue = ArrayDeque<Pending>()
+
+    private fun policyView(): List<CombatTapQueuePolicy.Entry> = strokeQueue.map { it.policyEntry() }
     private var gestureInFlight = false
     private var pressSeq = 0
     private var lastQueueWarningMs = 0L
@@ -62,6 +90,7 @@ class InputService : AccessibilityService() {
     override fun onServiceConnected() {
         instance = this
         BotStatus.inputConnected = true
+        DiagnosticLog.event("input.connected", "backend=accessibility")
         PylaLog.p(TAG, "InputService connected")
     }
 
@@ -74,6 +103,7 @@ class InputService : AccessibilityService() {
             strokeQueue.clear()
             gestureInFlight = false
         }
+        DiagnosticLog.event("input.unbound", "backend=accessibility channels_reset=true")
         PylaLog.w(TAG, "InputService unbound")
         return super.onUnbind(intent)
     }
@@ -85,6 +115,7 @@ class InputService : AccessibilityService() {
             try {
                 packageManager.getLaunchIntentForPackage(pkg) != null
             } catch (t: Throwable) {
+                DiagnosticLog.failure("input", "foreground", "launch_intent_query_threw", t)
                 false
             }
         }
@@ -132,6 +163,7 @@ class InputService : AccessibilityService() {
             val now = android.os.SystemClock.elapsedRealtime()
             if (now - lastQueueWarningMs >= 5_000L) {
                 lastQueueWarningMs = now
+                DiagnosticLog.sample("input.gesture.queue_saturated", "op=enqueue", 5_000)
                 PylaLog.w(TAG, "gesture queue saturated; discarded oldest pending touch")
             }
         }
@@ -140,13 +172,12 @@ class InputService : AccessibilityService() {
 
     private fun restorePending(items: List<Pending>) {
         for (item in items.asReversed()) {
+            val entry = item.policyEntry()
+            // Only a guarded combat tap consults its authority here; navigation consumed its
+            // ticket and unguarded work carries none, so neither is downgraded by this check.
+            val authorityAllows = if (!entry.isCombatTap) true else item.authority?.allows("restorePending") == true
             // Navigation consumes its request even on failure: only a fresh gate ticket may retry.
-            if (!item.replayable) continue
-            if (item.authority != null) {
-                if (!item.authority.allows()) continue
-                // Keep at most one waiting basic attack, including after cancellation/rejection.
-                if (strokeQueue.any { it.authority != null && it.replayable }) continue
-            }
+            if (!CombatTapQueuePolicy.shouldRestore(policyView(), entry, authorityAllows)) continue
             if (strokeQueue.size >= MAX_QUEUED_STROKES) strokeQueue.removeLast()
             strokeQueue.addFirst(item)
         }
@@ -163,11 +194,11 @@ class InputService : AccessibilityService() {
         handler.post {
             joystickCh.authority = authority
             if (!admitted || authority?.allows() == false) {
-                joystickCh.wantDown = false
+                joystickCh.requestRelease()
                 pump()
                 return@post
             }
-            if (!joystickCh.wantDown) { joystickCh.downX = cx; joystickCh.downY = cy }
+            if (!joystickCh.wantDown || joystickCh.releasePending) { joystickCh.downX = cx; joystickCh.downY = cy }
             joystickCh.wantDown = true
             joystickCh.targetX = cx + dx
             joystickCh.targetY = cy + dy
@@ -176,7 +207,7 @@ class InputService : AccessibilityService() {
     }
 
     fun releaseJoystick() {
-        handler.post { joystickCh.wantDown = false; pump() }
+        handler.post { joystickCh.requestRelease(); pump() }
     }
 
     fun holdKey(key: String) {
@@ -194,11 +225,11 @@ class InputService : AccessibilityService() {
             pressSeq++
             attackCh.authority = authority
             if (!admitted || authority?.allows() == false) {
-                attackCh.wantDown = false
+                attackCh.requestRelease()
                 pump() // If the old contact was held, its UP remains required.
                 return@post
             }
-            if (!attackCh.wantDown) { attackCh.downX = x; attackCh.downY = y }
+            if (!attackCh.wantDown || attackCh.releasePending) { attackCh.downX = x; attackCh.downY = y }
             attackCh.wantDown = true
             attackCh.targetX = x
             attackCh.targetY = y
@@ -213,15 +244,51 @@ class InputService : AccessibilityService() {
         handler.post {
             if (authority?.allows() == false) return@post
             if (authority != null) {
-                // Freshest request replaces a waiting guarded tap, never an unguarded UI action.
-                if (strokeQueue.removeAll { it.authority != null && it.replayable })
+                // Freshest request replaces a waiting guarded basic-attack tap only. Super, gadget
+                // and hypercharge have their own channels and must never be starved by attacks.
+                val channel = CombatTapQueuePolicy.CHANNEL_ATTACK
+                if (strokeQueue.removeAll { CombatTapQueuePolicy.replaces(it.policyEntry(), channel) })
                     DiagnosticLog.sample("input.gesture.coalesced", "op=basic_attack")
             }
             // Normal combat presses are discrete PC-style taps. Keeping them on the
             // continuous attack channel caused repeated attack() calls to cancel each
             // other's release and turn into one long hold, which is not equivalent to
             // the PC click/touch_down/touch_up sequence.
-            enqueueAndPump(Pending(x, y, x, y, holdMs.coerceIn(1, 10_000), authority))
+            enqueueAndPump(
+                Pending(
+                    x, y, x, y, holdMs.coerceIn(1, 10_000), authority,
+                    channel = if (authority != null) CombatTapQueuePolicy.CHANNEL_ATTACK else null,
+                ),
+            )
+        }
+    }
+
+    /**
+     * Guarded named ability tap (`super`, `gadget`, `hypercharge`).
+     *
+     * Each ability owns a distinct bounded queue channel, so requesting all of them in one tick
+     * keeps one waiting tap per ability instead of letting the newest one replace all others.
+     * [guard] is mandatory (no unguarded overload exists) and the same sticky [Authority] is
+     * checked at admission, at queued dispatch and on every restoration. Unknown keys and `attack`
+     * are rejected rather than rewritten: the basic attack keeps [pressAndRelease]'s channel.
+     */
+    fun pressCombatAbility(key: String, x: Float, y: Float, holdMs: Long, guard: () -> Boolean) {
+        val rejection = CombatTapQueuePolicy.validateAbilityRequest(key, x, y, holdMs)
+        if (rejection != CombatTapQueuePolicy.Rejection.NONE) {
+            DiagnosticLog.event("input.gesture.rejected", "op=ability key=$key reason=$rejection")
+            PylaLog.w(TAG, "ability tap ignored: key=$key reason=$rejection")
+            return
+        }
+        val authority = Authority(guard)
+        if (!authority.allows("pressCombatAbility")) return
+        handler.post {
+            if (!authority.allows("pressCombatAbility")) return@post
+            if (strokeQueue.removeAll { CombatTapQueuePolicy.replaces(it.policyEntry(), key) }) {
+                DiagnosticLog.sample("input.gesture.coalesced", "op=ability channel=$key")
+            }
+            enqueueAndPump(
+                Pending(x, y, x, y, holdMs.coerceIn(1, 10_000), authority, replayable = true, channel = key),
+            )
         }
     }
 
@@ -239,7 +306,7 @@ class InputService : AccessibilityService() {
         if (key != "attack") return
         handler.post {
             pressSeq++
-            attackCh.wantDown = false
+            attackCh.requestRelease()
             pump()
         }
     }
@@ -247,10 +314,13 @@ class InputService : AccessibilityService() {
     private fun pump() {
         if (gestureInFlight) return
         val channels = listOf(joystickCh, attackCh)
-        // At most one held attack and one waiting guarded tap can lose authority. Each denial is
-        // sticky; three passes suffice to rebuild without either, retaining unguarded work and UP.
-        for (attempt in 0..2) {
-            channels.forEach { if (it.wantDown && it.authority?.allows() == false) it.wantDown = false }
+        // One held attack plus up to one waiting guarded tap per known combat channel can lose
+        // authority. Each denial is sticky, so one pass per possible denial (+1) is enough to
+        // rebuild without any of them while retaining unguarded work and every required UP.
+        // The bound is finite and every pass re-checks the same sticky authority: extra attempts
+        // can only drop work, never revive it.
+        for (attempt in 0 until CombatTapQueuePolicy.MAX_REBUILD_ATTEMPTS) {
+            channels.forEach { if (it.wantDown && it.authority?.allows() == false) it.requestRelease() }
             if (!channels.any { it.needsUpdate() } && strokeQueue.isEmpty()) return
             val before = channels.map { it.snapshot() }
             // A gesture that continues an already-open pointer must not introduce a new pointer in
@@ -284,8 +354,11 @@ class InputService : AccessibilityService() {
             }
             if (strokeCount == 0) return
             val gesture = try { builder.build() } catch (t: Throwable) {
+                DiagnosticLog.failure("input", "gesture_build", "build_threw", t)
                 PylaLog.w(TAG, "gesture build failed: ${t.message}")
-                channels.forEach { it.reset() }
+                // Build failed before any dispatch: retain the established pointer chains and
+                // their pending UP edges so retry cannot silently erase a required release.
+                channels.forEachIndexed { i, ch -> ch.restore(before[i]) }
                 restorePending(queuedForGesture)
                 handler.postDelayed({ pump() }, DISPATCH_RETRY_MS)
                 return
@@ -297,22 +370,27 @@ class InputService : AccessibilityService() {
                 // channel: otherwise an unaffected joystick could continue an unsent predecessor.
                 channels.forEachIndexed { i, ch ->
                     ch.restore(before[i])
-                    if (deniedChannels[i]) ch.wantDown = false
+                    if (deniedChannels[i]) ch.requestRelease()
                 }
                 restorePending(queuedForGesture)
                 continue
             }
         gestureInFlight = true
         val diagnosticDispatchId = ++diagnosticDispatchSeq
+        val diagnosticNativeStarted = PipelineTimingTelemetry.nowMs()
         val accepted = try {
             dispatchGesture(gesture, object : GestureResultCallback() {
                 override fun onCompleted(g: GestureDescription?) {
+                    // Includes Android gesture duration/scheduling; never game-effect proof.
+                    PipelineTimingTelemetry.elapsed(Stage.INPUT_CALLBACK, diagnosticNativeStarted)
                     DiagnosticLog.sample("input.gesture.completed", "dispatch=$diagnosticDispatchId strokes=$strokeCount (Android callback; not game-effect proof)")
                     gestureInFlight = false
                     pump()
                 }
 
                 override fun onCancelled(g: GestureDescription?) {
+                    PipelineTimingTelemetry.elapsed(Stage.INPUT_CALLBACK, diagnosticNativeStarted)
+                    PipelineTimingTelemetry.interruption("ANDROID_CANCELLED")
                     DiagnosticLog.event("input.gesture.cancelled", "dispatch=$diagnosticDispatchId strokes=$strokeCount restored=${queuedForGesture.size}")
                     // Android has already lifted every pointer of the cancelled gesture. Drop the
                     // established chains so the next dispatch presses fresh, but preserve each logical
@@ -329,15 +407,20 @@ class InputService : AccessibilityService() {
                 }
             }, handler)
         } catch (t: Throwable) {
+            PipelineTimingTelemetry.interruption("ANDROID_DISPATCH_EXCEPTION")
+            DiagnosticLog.failure("input", "gesture_dispatch", "dispatch_threw", t)
             PylaLog.w(TAG, "dispatch failed: ${t.message}")
             false
         }
+        PipelineTimingTelemetry.elapsed(Stage.INPUT_SUBMISSION, diagnosticNativeStarted)
         DiagnosticLog.sample("input.gesture.dispatch", "dispatch=$diagnosticDispatchId accepted=$accepted strokes=$strokeCount (API acknowledgement only)")
         if (!accepted) {
+            PipelineTimingTelemetry.interruption("ANDROID_REJECTED")
             DiagnosticLog.event("input.gesture.rejected", "dispatch=$diagnosticDispatchId strokes=$strokeCount restored=${queuedForGesture.size}")
             gestureInFlight = false
-            joystickCh.reset()
-            attackCh.reset()
+            // A rejected dispatch never submitted these speculative continuations. Only an
+            // actual cancellation callback is evidence that Android lifted the old contacts.
+            channels.forEachIndexed { i, ch -> ch.restore(before[i]) }
             restorePending(queuedForGesture)
             handler.postDelayed({ pump() }, DISPATCH_RETRY_MS)
         }
@@ -363,7 +446,7 @@ class InputService : AccessibilityService() {
                 ch.lastStroke = s
                 s
             }
-            !ch.wantDown && ch.isDown && prev != null -> {
+            (!ch.wantDown || ch.releasePending) && ch.isDown && prev != null -> {
                 val path = stationaryPath(ch.curX, ch.curY)
                 val s = prev.continueStroke(path, 0L, RELEASE_DURATION_MS, false)
                 ch.reset()
@@ -434,8 +517,9 @@ class InputService : AccessibilityService() {
         private const val HOLD_DURATION_MS = 96L
         private const val KEEP_ALIVE_PX = 1f
         private const val RELEASE_DURATION_MS = 16L
-        private const val MAX_STROKES_PER_GESTURE = 8
-        private const val MAX_QUEUED_STROKES = 16
+        // Global bounds, unchanged: one pending per combat channel never lifts them.
+        private const val MAX_STROKES_PER_GESTURE = CombatTapQueuePolicy.MAX_STROKES_PER_GESTURE
+        private const val MAX_QUEUED_STROKES = CombatTapQueuePolicy.MAX_QUEUED_STROKES
         private const val DISPATCH_RETRY_MS = 24L
 
         @Volatile private var instance: InputService? = null

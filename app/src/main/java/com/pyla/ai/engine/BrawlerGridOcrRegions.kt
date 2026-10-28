@@ -118,7 +118,7 @@ object BrawlerGridOcrRegions {
      */
     fun pagingPlan(width: Int, height: Int): GridOcrPlan? {
         val base = buildPlan(width, height) ?: return null
-        val source = region(40, 0, 75, 6, width, height) ?: return null
+        val source = region(40, 0, 75, 7, width, height) ?: return null
         val destination = GridOcrRect(0, base.height + GUTTER,
             source.width * 2, base.height + GUTTER + source.height * 2)
         return base.copy(width = maxOf(base.width, destination.right), height = destination.bottom,

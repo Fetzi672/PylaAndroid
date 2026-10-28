@@ -512,11 +512,11 @@ class BrawlerGridContinuationTest {
     }
 
     @Test fun sortLabelClippingTheRegionBoundaryFails() {
-        // A box that starts before 40% or ends after 75%/6% is not fully inside the strip.
+        // A box that starts before 40% or ends after 75%/7% is not fully inside the strip.
         val clipping = listOf(
             hit("Rarity", 500, 5, 640, 30),   // left edge before the 40% mark
             hit("Rarity", 520, 5, 970, 30),   // right edge past the 75% mark
-            hit("Rarity", 520, 0, 640, 40),   // bottom edge past the 6% mark
+            hit("Rarity", 520, 0, 640, 43),   // one pixel past the corrected 7% mark at h=600
         )
         for (sort in clipping) {
             val first = scan(at = 99_000L, hits = rowHits() + sort)
@@ -624,9 +624,9 @@ class BrawlerGridContinuationTest {
 
     @Test fun regionOfInterestAndStripGeometryAreExact() {
         val small = BrawlerGridContinuation.sortRegion(1280, 591)
-        assertTrue(small.left == 512 && small.top == 0 && small.right == 960 && small.bottom == 35)
+        assertTrue(small.left == 512 && small.top == 0 && small.right == 960 && small.bottom == 41)
         val control = BrawlerGridContinuation.sortRegion(1920, 886)
-        assertTrue(control.left == 768 && control.top == 0 && control.right == 1440 && control.bottom == 53)
+        assertTrue(control.left == 768 && control.top == 0 && control.right == 1440 && control.bottom == 62)
 
         // The three body bands are exactly the plan's card-title strips; the helper must not assume
         // the plan's total tile count, so the bands are read from the plan itself.

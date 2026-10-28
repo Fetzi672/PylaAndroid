@@ -1,7 +1,9 @@
 package com.pyla.ai.overlay
 
 /**
- * Pure helpers for the single-line status strip: text composition, width fitting and state colour.
+ * Shared single-line text helpers: the engine-state vocabulary, the state colour used by the bubble
+ * ring and the HUD dot, and ellipsis fitting used by the pill's truncatable runs.
+ *
  * Kept free of Android imports so it is fully unit-testable on the JVM.
  */
 object OverlayStatusText {
@@ -9,7 +11,7 @@ object OverlayStatusText {
     const val ELLIPSIS = "…"
     const val NO_ACTION = "No active action"
 
-    /** Engine state label used both in the strip and in the bubble content description. */
+    /** Engine state label used in the bubble content description. */
     fun engineState(running: Boolean, paused: Boolean): String = when {
         running && paused -> "Paused"
         running -> "Running"
@@ -20,6 +22,9 @@ object OverlayStatusText {
      * Compose the strip: `PYLA <Engine> | <State line> | <Check line> | Last: <action>`.
      * [stateLine] and [checkLine] come from RuntimeVerification (already labelled); [last] is the
      * raw engine last-action and falls back to a neutral placeholder.
+     *
+     * Retained from the previous full-width strip so its helpers and tests stay source compatible;
+     * the pill itself composes its runs through [HudPillLayout].
      */
     fun compose(engineLabel: String, stateLine: String, checkLine: String, last: String): String {
         return parts(engineLabel, stateLine, checkLine, last).joinToString(" | ")

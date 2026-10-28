@@ -44,7 +44,8 @@ object BrawlerGridContinuation {
     const val SORT_LEFT_PCT: Int = 40
     const val SORT_RIGHT_PCT: Int = 75
     const val SORT_TOP_PCT: Int = 0
-    const val SORT_BOTTOM_PCT: Int = 6
+    // Preserve complete caption descenders observed in the native fixture (bottom y=38/591).
+    const val SORT_BOTTOM_PCT: Int = 7
 
     private const val PERCENT = 100L
 
@@ -75,6 +76,7 @@ object BrawlerGridContinuation {
     private val SORT_LABELS = setOf(
         "rarity",
         "seltenheit",
+        "seltenheitsgrad",
         "rarità",
         "rarita",
         "rareté",

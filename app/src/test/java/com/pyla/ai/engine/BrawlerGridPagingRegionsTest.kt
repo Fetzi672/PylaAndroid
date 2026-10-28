@@ -11,7 +11,7 @@ class BrawlerGridPagingRegionsTest {
             assertEquals(original.tiles, paging.tiles.take(4))
             assertEquals(5, paging.tiles.size)
             val sort = paging.tiles.last()
-            assertEquals(GridOcrRect(w*40/100,0,w*75/100,h*6/100),sort.source)
+            assertEquals(GridOcrRect(w*40/100,0,w*75/100,h*7/100),sort.source)
             assertEquals(original.height+24,sort.destination.top)
             assertEquals(sort.source.width*2,sort.destination.width)
             assertEquals(sort.source.height*2,sort.destination.height)
@@ -25,7 +25,7 @@ class BrawlerGridPagingRegionsTest {
         assertEquals(t.source,BrawlerGridOcrRegions.map(p,t.destination))
         assertEquals(GridOcrRect(512,0,513,1),BrawlerGridOcrRegions.map(p,
             GridOcrRect(0,t.destination.top,1,t.destination.top+1)))
-        assertEquals(GridOcrRect(959,34,960,35),BrawlerGridOcrRegions.map(p,
+        assertEquals(GridOcrRect(959,40,960,41),BrawlerGridOcrRegions.map(p,
             GridOcrRect(t.destination.right-1,t.destination.bottom-1,t.destination.right,t.destination.bottom)))
     }
     @Test fun separatorAndCrossTileBoxesRemainRejected() {
