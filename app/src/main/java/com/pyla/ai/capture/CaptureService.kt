@@ -64,10 +64,23 @@ class CaptureService : Service() {
                 val w = intent.getIntExtra(EXTRA_WIDTH, 1280)
                 val h = intent.getIntExtra(EXTRA_HEIGHT, 720)
                 startForegroundCompat()
-                if (data != null) startCapture(resultCode, data, w, h)
+                if (data != null) {
+                    try {
+                        startCapture(resultCode, data, w, h)
+                    } catch (t: Throwable) {
+                        // Observation only at the real start boundary; the original throw is preserved.
+                        DiagnosticLog.failure("capture", "start", "start_threw", t)
+                        throw t
+                    }
+                } else DiagnosticLog.failure("capture", "start", "result_data_missing")
             }
             ACTION_STOP -> {
-                try { com.pyla.ai.engine.BotEngine.instance?.stop() } catch (t: Throwable) { Log.w(TAG, "engine stop: ${t.message}") }
+                try {
+                    com.pyla.ai.engine.BotEngine.instance?.stop("capture_stop_action")
+                } catch (t: Throwable) {
+                    DiagnosticLog.failure("capture", "stop", "engine_stop_threw", t)
+                    Log.w(TAG, "engine stop: ${t.message}")
+                }
                 stopCapture()
                 if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) stopForeground(STOP_FOREGROUND_REMOVE)
                 else @Suppress("DEPRECATION") stopForeground(true)
@@ -104,10 +117,16 @@ class CaptureService : Service() {
     }
 
     private val imageListener = ImageReader.OnImageAvailableListener { reader ->
-        val image: Image? = try { reader.acquireLatestImage() } catch (t: Throwable) { null }
+        val image: Image? = try {
+            reader.acquireLatestImage()
+        } catch (t: Throwable) {
+            DiagnosticLog.failure("capture", "frame_acquire", "acquire_threw", t)
+            null
+        }
         if (image != null) {
             try {
                 if (image.width == width && image.height == height) handleImage(image)
+                else DiagnosticLog.sample("capture.frame_ignored", "reason=size_mismatch", 10_000)
             } finally { image.close() }
         }
     }
@@ -151,6 +170,7 @@ class CaptureService : Service() {
             virtualDisplay?.resize(w, h, resources.displayMetrics.densityDpi)
             virtualDisplay?.surface = newReader.surface
         } catch (t: Throwable) {
+            DiagnosticLog.failure("capture", "resize", "virtual_display_threw", t)
             Log.w(TAG, "virtual display resize failed: ${t.message}")
         }
         imageReader?.close()
@@ -174,7 +194,11 @@ class CaptureService : Service() {
             p.registerCallback(object : MediaProjection.Callback() {
                 override fun onStop() {
                     DiagnosticLog.event("capture.projection_stopped", "size=${width}x$height")
-                    Log.w(TAG, "MediaProjection stopped"); stopCapture()
+                    Log.w(TAG, "MediaProjection stopped")
+                    try { stopCapture() } finally {
+                        // A callback is observed; Android does not identify who initiated this stop.
+                        DiagnosticLog.failure("capture", "projection", "projection_stopped_callback")
+                    }
                 }
             }, null)
         }
@@ -248,12 +272,16 @@ class CaptureService : Service() {
         try {
             (getSystemService(Context.DISPLAY_SERVICE) as DisplayManager)
                 .unregisterDisplayListener(displayListener)
-        } catch (_: Throwable) {}
+        } catch (t: Throwable) {
+            DiagnosticLog.failure("capture", "stop", "display_listener_unregister_threw", t)
+        }
         virtualDisplay?.release(); virtualDisplay = null
         imageReader?.close(); imageReader = null
         val activeProjection = projection
         projection = null
-        try { activeProjection?.stop() } catch (_: Throwable) {}
+        try { activeProjection?.stop() } catch (t: Throwable) {
+            DiagnosticLog.failure("capture", "stop", "projection_release_threw", t)
+        }
         frameLock.withLock { latest = null; latestTimestampMs = 0 }
         DiagnosticLog.event("capture.stopped", "size=${width}x$height")
         Log.i(TAG, "Capture stopped")

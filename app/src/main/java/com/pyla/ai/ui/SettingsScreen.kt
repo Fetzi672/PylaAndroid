@@ -19,6 +19,8 @@ import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.Speed
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Refresh
+import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
@@ -47,6 +49,7 @@ import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.pyla.ai.config.PylaUserSettings
+import com.pyla.ai.engine.SavedAttackButtonCalibration
 
 private fun cfg(file: String) = "cfg/$file.toml"
 
@@ -99,6 +102,22 @@ fun SettingsScreen(
     onOpenOverlayPermission: () -> Unit = {},
 ) {
     var refreshTrigger by remember { mutableStateOf(0) }
+    var confirmCalibrationReset by remember { mutableStateOf(false) }
+    var calibrationResetMessage by remember { mutableStateOf<String?>(null) }
+    var calibrationResetGeneration by remember { mutableStateOf(0) }
+    var calibrationResetRemoved by remember { mutableStateOf(false) }
+    LaunchedEffect(calibrationResetGeneration) {
+        if (calibrationResetGeneration == 0) return@LaunchedEffect
+        repeat(50) {
+            if (SavedAttackButtonCalibration.persistenceSettled()) {
+                calibrationResetMessage = if (calibrationResetRemoved) "Saved attack button cleared."
+                    else "No saved attack button was stored; pending learning was reset."
+                return@LaunchedEffect
+            }
+            kotlinx.coroutines.delay(100)
+        }
+        calibrationResetMessage = "Calibration reset is still pending. Keep the app open."
+    }
     fun refresh() { refreshTrigger++ }
     LaunchedEffect(refreshTrigger) { }
 
@@ -119,6 +138,28 @@ fun SettingsScreen(
                     }
                 }
             }
+            PylaCard {
+                SectionHeader(Icons.Default.Refresh, "Attack Button Calibration", PylaColors.Yellow)
+                Spacer(Modifier.height(6.dp))
+                Text(
+                    "The attack button is learned from two fresh template matches at the start of a match and " +
+                        "reused on later launches without per-frame matching. Reset forgets the saved location " +
+                        "so the next match learns it again.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = PylaColors.TextLow,
+                )
+                TextButton(
+                    colors = ButtonDefaults.textButtonColors(contentColor = PylaColors.Red),
+                    onClick = { confirmCalibrationReset = true },
+                ) { Text("Reset saved attack button", style = MaterialTheme.typography.labelLarge) }
+                calibrationResetMessage?.let { message ->
+                    Text(
+                        message,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = PylaColors.TextMed,
+                    )
+                }
+            }
             Text(
                 "Settings are written directly to the TOML config files on disk. Changes take effect on next bot start.",
                 style = MaterialTheme.typography.bodySmall,
@@ -126,6 +167,35 @@ fun SettingsScreen(
                 modifier = Modifier.padding(bottom = 28.dp),
             )
         }
+    }
+
+    if (confirmCalibrationReset) {
+        AlertDialog(
+            onDismissRequest = { confirmCalibrationReset = false },
+            title = { Text("Reset saved attack button?") },
+            text = {
+                Text(
+                    "This forgets the learned attack-button location and discards any pending learning. " +
+                        "The next match learns it again from two fresh template matches.",
+                )
+            },
+            confirmButton = {
+                TextButton(onClick = {
+                    confirmCalibrationReset = false
+                    val reset = runCatching { SavedAttackButtonCalibration.clear() }
+                    if (reset.isSuccess) {
+                        calibrationResetRemoved = reset.getOrThrow()
+                        calibrationResetMessage = "Clearing saved attack button..."
+                        calibrationResetGeneration++
+                    } else {
+                        calibrationResetMessage = "Could not clear calibration. Stop the bot and try again."
+                    }
+                }) { Text("Reset") }
+            },
+            dismissButton = {
+                TextButton(onClick = { confirmCalibrationReset = false }) { Text("Cancel") }
+            },
+        )
     }
 }
 

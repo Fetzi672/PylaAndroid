@@ -2,6 +2,7 @@ package com.pyla.ai.engine
 
 import android.content.Context
 import android.content.Intent
+import com.pyla.ai.diagnostics.DiagnosticLog
 import com.pyla.ai.config.PylaConfig
 
 object GameLauncher {
@@ -13,6 +14,7 @@ object GameLauncher {
         PylaConfig.load("cfg/general_config.toml").getString("brawl_stars_package", DEFAULT_PACKAGE)
             .ifBlank { DEFAULT_PACKAGE }
     } catch (t: Throwable) {
+        DiagnosticLog.failure("launcher", "config", "package_config_failed", t)
         DEFAULT_PACKAGE
     }
 
@@ -23,6 +25,7 @@ object GameLauncher {
     fun launch(context: Context, pkg: String = gamePackage()): Boolean {
         val intent = context.packageManager.getLaunchIntentForPackage(pkg)
         if (intent == null) {
+            DiagnosticLog.failure("launcher", "launch", "game_not_installed")
             PylaLog.w(TAG, "Brawl Stars ($pkg) is not installed on this device")
             BotStatus.error("Brawl Stars not installed ($pkg)")
             return false
@@ -34,6 +37,7 @@ object GameLauncher {
             BotStatus.action("Launched Brawl Stars")
             true
         } catch (t: Throwable) {
+            DiagnosticLog.failure("launcher", "launch", "launch_exception", t)
             PylaLog.e(TAG, "Failed to launch $pkg", t)
             false
         }

@@ -1,10 +1,13 @@
 package com.pyla.ai.engine
 
+import com.pyla.ai.diagnostics.PipelineTimingTelemetry
+
 import android.os.SystemClock
 import com.pyla.ai.capture.CaptureService
 import com.pyla.ai.capture.InputCoordinates
 import com.pyla.ai.diagnostics.DiagnosticLog
 import com.pyla.ai.input.InputService
+import com.pyla.ai.input.CombatTapQueuePolicy
 
 class FrameSnapshot(
     val width: Int,
@@ -48,9 +51,11 @@ class WindowController(
         val deadline = SystemClock.elapsedRealtime() + 15_000L
         while (snap == null || snap.ageMs() > FRAME_STALE_TIMEOUT_MS) {
             if (SystemClock.elapsedRealtime() > deadline) {
+                DiagnosticLog.failure("window", "capture_wait", "no_fresh_frame")
                 throw IllegalStateException("No fresh frame from MediaProjection")
             }
-            try { Thread.sleep(50) } catch (_: InterruptedException) {
+            try { Thread.sleep(50) } catch (t: InterruptedException) {
+                DiagnosticLog.failure("window", "capture_wait", "interrupted", t)
                 throw IllegalStateException("Interrupted while waiting for a capture frame")
             }
             snap = latestFrameNow()
@@ -73,15 +78,24 @@ class WindowController(
 
     private fun latestFrameNow(): FrameSnapshot? {
         val timestamp = captureService.latestTimestampMs()
-        if (timestamp <= 0L || SystemClock.elapsedRealtime() - timestamp > FRAME_STALE_TIMEOUT_MS) return null
-        val copy = captureService.copyLatestFrame(copyBuffer) ?: return null
+        if (timestamp <= 0L || SystemClock.elapsedRealtime() - timestamp > FRAME_STALE_TIMEOUT_MS) {
+            DiagnosticLog.failure("window", "capture_read", if (timestamp <= 0L) "frame_missing" else "frame_stale")
+            return null
+        }
+        val copy = captureService.copyLatestFrame(copyBuffer) ?: run {
+            DiagnosticLog.failure("window", "capture_read", "frame_copy_unavailable")
+            return null
+        }
         copyBuffer = copy.rgbBuffer
         return FrameSnapshot(copy.width, copy.height, copy.rgbBuffer, copy.capturedAtMs)
     }
 
     private fun inputOrWarn(operation: String): InputService? {
         val input = InputService.get()
-        if (input == null) PylaLog.w(TAG, "$operation ignored: InputService not connected")
+        if (input == null) {
+            DiagnosticLog.failure("window", operation, "input_service_missing")
+            PylaLog.w(TAG, "$operation ignored: InputService not connected")
+        }
         return input
     }
 
@@ -104,24 +118,56 @@ class WindowController(
     /** Live gameplay authority also guards renewals, not just the initial joystick DOWN. */
     fun moveGuarded(dx: Float, dy: Float, guard: () -> Boolean) {
         val input = inputOrWarn("moveGuarded") ?: return
-        val allowed = try { guard() } catch (_: Exception) { false }
+        val allowed = try { guard() } catch (t: Exception) {
+            DiagnosticLog.failure("window", "move_guarded", "authority_exception", t)
+            false
+        }
         if (!allowed || !dx.isFinite() || !dy.isFinite()) {
+            PipelineTimingTelemetry.interruption(if (!allowed) "AUTHORITY_DENIED" else "NONFINITE")
+            DiagnosticLog.failure("window", "move_guarded", if (!allowed) "authority_denied" else "nonfinite_coordinates")
             releaseMovement()
             return
         }
-        val limit = 75f
-        val m = kotlin.math.hypot(dx.toDouble(), dy.toDouble()).toFloat()
-        val sx = if (m > limit && m > 0f) dx * limit / m else dx
-        val sy = if (m > limit && m > 0f) dy * limit / m else dy
+        // Strategy vectors are reference-space (1920x1080) offsets of at most one joystick radius;
+        // InputService expects capture-space offsets. PlaystyleContract is the single conversion
+        // point, so the throw keeps the same screen fraction on every resolution/aspect instead of
+        // being capped at a fixed pixel count. The authority check above is unchanged: a denied or
+        // threw guard still releases, and it is re-checked inside the queued joystick channel.
+        val geometry = PlaystyleContract.geometry(
+            if (width > 0 && height > 0) width else InputCoordinates.captureWidth,
+            if (width > 0 && height > 0) height else InputCoordinates.captureHeight,
+        )
+        val target = geometry?.let { g ->
+            val center = InputCoordinates.joystick()
+            PlaystyleContract.toJoystickDelta(
+                x = dx.toDouble(), y = dy.toDouble(), geometry = g,
+                radius = PylaUtils.JOYSTICK_RADIUS.toDouble(),
+                centerX = center.first.toDouble(), centerY = center.second.toDouble(),
+            )
+        }
+        if (target == null) {
+            PipelineTimingTelemetry.interruption("CONTRACT_REJECTED")
+            DiagnosticLog.failure("window", "move_guarded", "contract_rejected_vector")
+            releaseMovement()
+            return
+        }
+        val sx = target.x.toFloat(); val sy = target.y.toFloat()
+        if (!sx.isFinite() || !sy.isFinite()) {
+            DiagnosticLog.failure("window", "move_guarded", "nonfinite_coordinates")
+            releaseMovement()
+            return
+        }
         // Do not dedupe: even an unchanged direction must carry the current guard to the queue.
         lastJoystickX = sx; lastJoystickY = sy; areWeMoving = true
         DiagnosticLog.sample("window.joystick.requested", "x=$sx y=$sy guarded=true")
+        PipelineTimingTelemetry.movementRequest()
         input.joystickMoveGuarded(sx, sy, guard)
     }
 
     fun releaseMovement() {
         val input = InputService.get() ?: return
         if (areWeMoving) {
+            PipelineTimingTelemetry.interruption("RELEASE_REQUEST")
             DiagnosticLog.event("window.joystick.release_requested", "last=($lastJoystickX, $lastJoystickY)")
             input.releaseJoystick()
             areWeMoving = false
@@ -146,7 +192,10 @@ class WindowController(
     /** New navigation actions must retain their capture/lifecycle authority through the queue. */
     fun guardedNavigationTap(x: Float, y: Float, guard: () -> Boolean) {
         val input = inputOrWarn("guardedNavigationTap") ?: return
-        if (!guard()) return
+        if (!guard()) {
+            DiagnosticLog.failure("window", "navigation_tap", "authority_denied")
+            return
+        }
         releaseMovement()
         input.releaseJoystick()
         input.navigationTapOnce(x, y, 40L, guard)
@@ -169,7 +218,10 @@ class WindowController(
         val (bx, by) = InputCoordinates.press(key)
         if (bx < 0) { PylaLog.w(TAG, "guardedNavigationPress ignored: unknown key '$key'"); return }
         val input = inputOrWarn("guardedNavigationPress") ?: return
-        if (!guard()) return
+        if (!guard()) {
+            DiagnosticLog.failure("window", "navigation_press", "authority_denied")
+            return
+        }
         PylaLog.p(TAG, "guarded navigation press '$key' at ($bx,$by) hold=${delayMs + 20}ms")
         BotStatus.action("guarded press '$key' at ($bx,$by)")
         BotStatus.inputConnected = com.pyla.ai.input.InputService.isConnected()
@@ -232,7 +284,13 @@ class WindowController(
         if (key in COMBAT_KEYS) {
             val input = inputOrWarn("press") ?: return
             if (touchDown && touchUp) {
-                input.pressAndRelease(bx.toFloat(), by.toFloat(), delayMs + 40, guard)
+                if (guard != null && key in CombatTapQueuePolicy.ABILITY_CHANNELS) {
+                    // A guarded mapped ability tap owns its named channel: requesting super must
+                    // not displace a waiting gadget/hypercharge (or the basic attack).
+                    input.pressCombatAbility(key, bx.toFloat(), by.toFloat(), delayMs + 40, guard)
+                } else {
+                    input.pressAndRelease(bx.toFloat(), by.toFloat(), delayMs + 40, guard)
+                }
             } else {
                 click(bx.toFloat(), by.toFloat(), delayMs, touchUp, touchDown, guard)
             }
@@ -243,15 +301,52 @@ class WindowController(
 
     /** A visually located combat control, with the same queued combat guard as mapped presses. */
     fun pressCombatAt(x: Float, y: Float, guard: () -> Boolean) {
-        if (!x.isFinite() || !y.isFinite() || x < 0 || y < 0 || x >= width || y >= height) return
-        if (!guard()) return
+        if (!x.isFinite() || !y.isFinite() || x < 0 || y < 0 || x >= width || y >= height) {
+            DiagnosticLog.failure("window", "combat_tap", "invalid_coordinates")
+            return
+        }
+        if (!guard()) {
+            DiagnosticLog.failure("window", "combat_tap", "authority_denied")
+            return
+        }
         inputOrWarn("pressCombatAt")?.pressAndRelease(x, y, 60L, guard)
+    }
+
+    /**
+     * A visually located, guarded named ability control (`super`, `gadget`, `hypercharge`).
+     *
+     * Unlike [pressCombatAt] this keeps the ability on its own bounded queue channel, so a tick
+     * that issues several abilities retains one waiting tap per ability instead of the last one
+     * replacing all earlier guarded taps. Only known ability keys are accepted; `attack` and
+     * unknown names are rejected here and in `InputService`, never remapped. [guard] is mandatory
+     * and stays sticky in the input service.
+     */
+    fun pressAbilityCombatAt(key: String, x: Float, y: Float, guard: () -> Boolean) {
+        if (key !in CombatTapQueuePolicy.ABILITY_CHANNELS) {
+            PylaLog.w(TAG, "pressAbilityCombatAt ignored: unknown ability '$key'")
+            return
+        }
+        if (!x.isFinite() || !y.isFinite() || x < 0 || y < 0 || x >= width || y >= height) {
+            DiagnosticLog.failure("window", "ability_tap", "invalid_coordinates")
+            return
+        }
+        if (!guard()) {
+            DiagnosticLog.failure("window", "ability_tap", "authority_denied")
+            return
+        }
+        inputOrWarn("pressAbilityCombatAt")?.pressCombatAbility(key, x, y, 60L, guard)
     }
 
     /** A stationary charge at a visually verified control; never a drag toward an enemy. */
     fun holdCombatAt(x: Float, y: Float, guard: () -> Boolean) {
-        if (!x.isFinite() || !y.isFinite() || x < 0 || y < 0 || x >= width || y >= height) return
-        if (!guard()) return
+        if (!x.isFinite() || !y.isFinite() || x < 0 || y < 0 || x >= width || y >= height) {
+            DiagnosticLog.failure("window", "combat_hold", "invalid_coordinates")
+            return
+        }
+        if (!guard()) {
+            DiagnosticLog.failure("window", "combat_hold", "authority_denied")
+            return
+        }
         inputOrWarn("holdCombatAt")?.holdAttackAt(x, y, guard)
     }
 

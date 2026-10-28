@@ -7,8 +7,8 @@ import org.junit.Test
 
 class OverlayGeometryTest {
     private val metrics = OverlayMetrics(
-        bubbleSizePx = 132, controlSizePx = 132, statusHeightPx = 77,
-        edgeMarginPx = 22, controlGapPx = 22, statusTopGapPx = 11, dragSlopPx = 16,
+        bubbleSizePx = 132, controlSizePx = 132, hudHeightPx = 204,
+        edgeMarginPx = 22, controlGapPx = 22, hudTopGapPx = 12, dragSlopPx = 16,
     )
     private val phone = ScreenGeometry(widthPx = 1080, heightPx = 2400, insetTopPx = 90, insetBottomPx = 84)
 
@@ -19,12 +19,39 @@ class OverlayGeometryTest {
         assertEquals(OverlayGeometry.DEFAULT_RELATIVE_Y, OverlayGeometry.clampRelativeY(Float.POSITIVE_INFINITY), 0.0001f)
     }
 
-    @Test fun statusStripSitsBelowStatusBarAndAboveControlsBand() {
-        val status = OverlayGeometry.statusRect(phone, metrics)
+    @Test fun pillIsCentredBelowTheStatusBarAndAboveTheBubbleBand() {
+        val pill = OverlayGeometry.pillRect(phone, metrics, widthPx = 600, heightPx = 102)
         val band = OverlayGeometry.usableVerticalRange(phone, metrics)
-        assertTrue(status.top >= phone.insetTopPx)
-        assertTrue(status.bottom <= band.top)
-        assertEquals(phone.widthPx, status.width)
+        assertTrue(pill.top >= phone.insetTopPx)
+        assertTrue(pill.bottom <= band.top)
+        assertEquals(600, pill.width)
+        assertEquals(90 + 12, pill.top)
+        // Centred, not full width: equal gaps on both sides of the safe area.
+        assertEquals(phone.widthPx - pill.right, pill.left)
+        assertEquals((phone.widthPx - pill.width) / 2, pill.left)
+    }
+
+    @Test fun pillRespectsDisplayCutoutInsetsAndNeverExceedsTheSafeWidth() {
+        val cutout = ScreenGeometry(
+            widthPx = 1080, heightPx = 2400, insetLeftPx = 84, insetRightPx = 84, insetTopPx = 130,
+        )
+        val pill = OverlayGeometry.pillRect(cutout, metrics, widthPx = 5000, heightPx = 60)
+        assertEquals(1080 - 84 - 84 - 2 * metrics.edgeMarginPx, pill.width)
+        assertEquals(84 + metrics.edgeMarginPx, pill.left)
+        assertEquals(130 + metrics.hudTopGapPx, pill.top)
+        assertTrue(pill.right <= cutout.widthPx - cutout.insetRightPx)
+    }
+
+    @Test fun pillFitsPortraitAndLandscapeGeometry() {
+        val portrait = ScreenGeometry(widthPx = 1080, heightPx = 2400, insetTopPx = 90, insetBottomPx = 84)
+        val landscape = ScreenGeometry(widthPx = 2400, heightPx = 1080, insetTopPx = 40, insetLeftPx = 120, insetRightPx = 120)
+        listOf(portrait, landscape).forEach { screen ->
+            val pill = OverlayGeometry.pillRect(screen, metrics, widthPx = 700, heightPx = 102)
+            assertTrue(pill.left >= screen.insetLeftPx)
+            assertTrue(pill.right <= screen.widthPx - screen.insetRightPx)
+            val band = OverlayGeometry.usableVerticalRange(screen, metrics)
+            assertTrue(pill.bottom <= band.top)
+        }
     }
 
     @Test fun hiddenBubbleIsHalfOffScreenOnRight() {
@@ -105,10 +132,48 @@ class OverlayGeometryTest {
         val short = ScreenGeometry(widthPx = 2400, heightPx = 400, insetTopPx = 40, insetBottomPx = 24)
         val rects = OverlayGeometry.controlRects(DockSide.RIGHT, short, metrics, 1f)
         val band = OverlayGeometry.usableVerticalRange(short, metrics)
+        // Reserving the 68dp HUD band leaves only a 76px band on this fixture, far less than the
+        // 440px control column. The three controls must compress into the band rather than stack as
+        // identical, half-off-screen windows.
+        assertTrue(band.height < metrics.controlSizePx * 3 + metrics.controlGapPx * 2)
         rects.forEach {
             assertTrue(it.top >= band.top)
             assertTrue(it.bottom <= band.bottom)
+            assertTrue(it.top >= 0)
+            assertTrue(it.bottom <= short.heightPx - short.insetBottomPx)
+            assertTrue(it.left >= short.insetLeftPx)
+            assertTrue(it.right <= short.widthPx - short.insetRightPx)
+            assertTrue(it.height < metrics.controlSizePx)
+            assertTrue(it.height > 0 && it.width > 0)
         }
+        // Start above pause above stop, with no window covering another.
+        assertTrue(rects[0].bottom <= rects[1].top)
+        assertTrue(rects[1].bottom <= rects[2].top)
+        rects.zipWithNext().forEach { (a, b) -> assertFalse(a.overlaps(b)) }
+    }
+
+    @Test fun degenerateBandStillKeepsEveryControlOnScreen() {
+        // A 6px band cannot hold three separated cells; they still may never leave the band.
+        val tiny = ScreenGeometry(widthPx = 2400, heightPx = 330, insetTopPx = 40, insetBottomPx = 24)
+        val band = OverlayGeometry.usableVerticalRange(tiny, metrics)
+        assertTrue(band.height < 7)
+        val rects = OverlayGeometry.controlRects(DockSide.RIGHT, tiny, metrics, 0.5f)
+        rects.forEach {
+            assertTrue(it.top >= band.top)
+            assertTrue(it.bottom <= band.bottom)
+            assertTrue(it.bottom <= tiny.heightPx - tiny.insetBottomPx)
+            assertTrue(it.left >= tiny.insetLeftPx)
+            assertTrue(it.right <= tiny.widthPx - tiny.insetRightPx)
+        }
+    }
+
+    @Test fun roomyDisplayKeepsFullSizedControls() {
+        val rects = OverlayGeometry.controlRects(DockSide.RIGHT, phone, metrics, 0.5f)
+        rects.forEach {
+            assertEquals(metrics.controlSizePx, it.width)
+            assertEquals(metrics.controlSizePx, it.height)
+        }
+        assertTrue(rects[0].bottom < rects[1].top)
     }
 
     @Test fun snapSidePicksNearestEdge() {
@@ -117,10 +182,19 @@ class OverlayGeometryTest {
         assertEquals(DockSide.RIGHT, OverlayGeometry.snapSide(540, phone))
     }
 
-    @Test fun statusDoesNotOverlapControls() {
-        val status = OverlayGeometry.statusRect(phone, metrics)
+    @Test fun pillDoesNotOverlapControls() {
+        val pill = OverlayGeometry.pillRect(phone, metrics, widthPx = 600, heightPx = 102)
         val rects = OverlayGeometry.controlRects(DockSide.LEFT, phone, metrics, 0.0f)
-        rects.forEach { assertFalse(it.overlaps(status)) }
+        rects.forEach { assertFalse(it.overlaps(pill)) }
+    }
+
+    @Test fun detailedPillStillFitsBelowTheBubbleBand() {
+        val band = OverlayGeometry.usableVerticalRange(phone, metrics)
+        val detailed = OverlayGeometry.pillRect(phone, metrics, widthPx = 900, heightPx = metrics.hudHeightPx)
+        assertTrue(detailed.bottom <= band.top)
+        // Reserving the detail row means opening the menu never moves the bubble.
+        val bubbleBefore = OverlayGeometry.bubbleRect(DockSide.RIGHT, phone, metrics, 0.0f, 1f)
+        assertTrue(bubbleBefore.top >= detailed.bottom)
     }
 
     @Test fun slopDetection() {
