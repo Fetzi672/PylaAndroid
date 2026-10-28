@@ -9,7 +9,7 @@ package com.pyla.ai.overlay
 object OverlayStatusText {
     const val PREFIX = "PYLA"
     const val ELLIPSIS = "…"
-    const val NO_ACTION = "No active action"
+    const val NO_ACTION = "No active action \n DISCLAIMER: USE OVERLAY WITH CAUTION! IT MAY NOT LET THE BOT SEE THINGS ON THE SCREEN!"
 
     /** Engine state label used in the bubble content description. */
     fun engineState(running: Boolean, paused: Boolean): String = when {

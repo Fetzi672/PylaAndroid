@@ -1,7 +1,7 @@
 # AGENTS.md
 
 Guidance for automated agents and reviewers working on PylaAndroid — an on-device
-Kotlin/Compose port of PylaAI for Android (GPL-3.0, early beta). Nothing here
+Kotlin/Compose port of PylaAI for Android (ANCS-1.0, early beta). Nothing here
 promises unattended gameplay. Read `README.md`, `docs/FORK_STATUS.md`,
 `docs/KNOWN_ISSUES.md`, `docs/CI.md` and `docs/DIAGNOSTICS.md` before changing code.
 

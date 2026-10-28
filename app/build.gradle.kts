@@ -7,7 +7,7 @@ plugins {
 val pylaRoot = layout.projectDirectory.dir("../PylaAI-OriginalPCVersion")
 
 tasks.register<Copy>("copyPylaAssets") {
-    description = "Copy cfg/, models/, images/, playstyles/ from the Python project into app assets so they ship inside the APK."
+    description = "Copy cfg/, models/, images/, playstyles/ from the upstream PylaAI repository into app assets so they ship inside the APK."
     group = "pyla"
     val dest = layout.projectDirectory.dir("src/main/assets/pyla")
     from(pylaRoot.dir("cfg")) { into("cfg") }
