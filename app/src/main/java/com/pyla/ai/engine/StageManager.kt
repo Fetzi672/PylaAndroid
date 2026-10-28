@@ -24,6 +24,12 @@ class StageManager(
         /** PC parity: the end screen must clear within this bounded, monotonic window. */
         private const val END_SCREEN_TIMEOUT_MS = 35_000L
 
+        /** Distinct fresh captures required before the upper-left menu BACK may be dispatched. */
+        private const val MENU_BACK_RECHECK_FRAMES = 2
+
+        /** Spacing between those captures; keeps the pair inside the BACK admission age window. */
+        private const val MENU_BACK_RECHECK_STEP_MS = 250L
+
         /**
          * Screens Stage is expected to navigate. A positive member is required for every menu action,
          * so a combat, startup or unclassified screen never authorises a menu tap on its own.
@@ -39,6 +45,8 @@ class StageManager(
 
     val trophyObserver = TrophyObserver()
     private val defeatedExitGate = DefeatedExitGate()
+    /** Positive menu identity gate for the upper-left BACK (see [quitShop]). */
+    private val menuBackGate = MenuBackAdmission()
     @Volatile private var closed = false
 
     /**
@@ -67,6 +75,7 @@ class StageManager(
     fun invalidateNavigation() {
         navigationAuthority.invalidate()
         defeatedExitGate.invalidate(android.os.SystemClock.elapsedRealtime())
+        menuBackGate.invalidate()
     }
 
     fun navigationStateObserved(state: String?) = defeatedExitGate.screenChanged(state)
@@ -106,8 +115,10 @@ class StageManager(
                 val step = remaining.coerceAtMost(NAV_WAIT_STEP_MS)
                 try {
                     Thread.sleep(step)
-                } catch (_: InterruptedException) {
+                } catch (t: InterruptedException) {
+                    // The interrupt is the cancellation cause; the flag is restored exactly as before.
                     Thread.currentThread().interrupt()
+                    DiagnosticLog.failure("stage", "await", "interrupted", t)
                     return false
                 }
                 remaining -= step
@@ -148,7 +159,10 @@ class StageManager(
                 com.pyla.ai.capture.InputCoordinates.captureHeight == frame.height &&
                 defeatedExitGate.allows(ticket, android.os.SystemClock.elapsedRealtime())
         }
-        if (!guard()) return
+        if (!guard()) {
+            DiagnosticLog.sample("navigation.denied", "phase=defeated_exit reason=evidence_or_authority", 10_000)
+            return
+        }
         DiagnosticLog.event("navigation.defeated_exit", "reason=visible_enabled_control attempt=${ticket.serial}")
         BotStatus.action("Pressing visible EXIT")
         windowController.guardedNavigationTap(observation.x, observation.y, guard)
@@ -175,7 +189,11 @@ class StageManager(
         PylaLog.p(TAG, "doState: $state")
         BotStatus.action("doState: $state")
         // One invocation per dispatched state, bound to the lifecycle epoch current right now.
-        val invocation = beginNavigation() ?: return
+        val invocation = beginNavigation()
+        if (invocation == null) {
+            DiagnosticLog.failure("stage", "navigation", "authority_unavailable")
+            return
+        }
         when (state) {
             "shop", "brawler_selection" -> quitShop(invocation, state)
             "popup" -> closePopUp(invocation)
@@ -216,9 +234,15 @@ class StageManager(
             val next = brawlersPickData[0]
             val nextBrawler = next["brawler"].toString()
             if (toBool(next["automatically_pick"], false)) {
-                if (!invocation.isLive) return
+                if (!invocation.isLive) {
+                    DiagnosticLog.failure("stage", "brawler_select", "authority_refused")
+                    return
+                }
                 val result = lobbyAutomator.selectBrawler(nextBrawler)
-                if (result != "success") throw BrawlerSelectionFailedException(result)
+                if (result != "success") {
+                    DiagnosticLog.failure("stage", "brawler_select", "selection_not_verified")
+                    throw BrawlerSelectionFailedException(result)
+                }
                 if (result == "success") {
                     trophyObserver.changeTrophies(toInt(next["trophies"], 0))
                     trophyObserver.currentWins = toInt(next["wins"], 0)
@@ -325,7 +349,12 @@ class StageManager(
         trophyObserver.changeTrophies(floor)
         entry["trophies"] = floor
         entry["win_streak"] = trophyObserver.winStreak
-        try { BotEngine.saveBrawlerData(brawlersPickData) } catch (t: Throwable) { Log.w(TAG, "queue save: ${t.message}") }
+        try {
+            BotEngine.saveBrawlerData(brawlersPickData)
+        } catch (t: Throwable) {
+            DiagnosticLog.failure("stage", "prestige_save", "queue_write_threw", t)
+            Log.w(TAG, "queue save: ${t.message}")
+        }
     }
 
     private fun currentStateFromScreen(): String {
@@ -352,7 +381,12 @@ class StageManager(
                 val v = if (typeToPush == "trophies") trophyObserver.currentTrophies else trophyObserver.currentWins
                 brawlersPickData[0][typeToPush] = v
                 brawlersPickData[0]["win_streak"] = trophyObserver.winStreak
-                try { BotEngine.saveBrawlerData(brawlersPickData) } catch (t: Throwable) { Log.w(TAG, "queue save: ${t.message}") }
+                try {
+                    BotEngine.saveBrawlerData(brawlersPickData)
+                } catch (t: Throwable) {
+                    DiagnosticLog.failure("stage", "end_save", "queue_write_threw", t)
+                    Log.w(TAG, "queue save: ${t.message}")
+                }
             }
             if (!buttonPressed && playAgainOnWin && parsedResult != null &&
                 parsedResult.result == MatchResultKind.VICTORY) {
@@ -377,6 +411,7 @@ class StageManager(
             // PC parity: the end screen never went away (frozen game / missed clicks), restart the
             // game so the bot can never get stuck here. Recovery is allowed only while THIS invocation
             // is still live (same session/state) with the current verified end-screen context.
+            DiagnosticLog.failure("stage", "end_screen", "timeout")
             Log.w(TAG, "End screen timeout reached, restarting the game.")
             relaunchGame(invocation)
         }
@@ -393,12 +428,16 @@ class StageManager(
     private fun relaunchGame(invocation: Invocation) {
         // The relaunch side effect is a navigation-class action: it may only run while the bound
         // lifecycle invocation is still live (same session, not Pause/Stop/closed).
-        if (closed || !invocation.isLive) return
+        if (closed || !invocation.isLive) {
+            DiagnosticLog.failure("stage", "relaunch", "authority_refused")
+            return
+        }
         try {
             val pkg = GameLauncher.gamePackage()
             BotStatus.action("Restarting Brawl Stars")
             GameLauncher.launch(com.pyla.ai.PylaApp.ctx(), pkg)
         } catch (t: Throwable) {
+            DiagnosticLog.failure("stage", "relaunch", "launch_threw", t)
             Log.w(TAG, "game relaunch failed: ${t.message}")
         }
         invocation.await(2_000)
@@ -422,6 +461,7 @@ class StageManager(
                 if (observed != state) {
                     // A newer image overrules the slower cached state, including already queued taps.
                     invalidateNavigation()
+                    DiagnosticLog.failure("stage", "star_drop", "observed_mismatch")
                     return
                 }
                 windowController.guardedNavigationPress("proceed", 50L, invocation.action(state))
@@ -430,11 +470,79 @@ class StageManager(
         }
     }
 
+    /**
+     * Upper-left menu BACK for `shop` / `brawler_selection`.
+     *
+     * The cached classifier state alone never authorises this tap: that is exactly how the 3.0.4
+     * Trio follower lost authority and tapped BACK eleven times inside a live match. Two distinct
+     * fresh captures are re-classified here, `brawler_selection` additionally needs its independent
+     * second menu control, and any visible in-match HUD control denies the pair outright. The
+     * granted ticket is re-validated at queued dispatch against live authority, the cached state,
+     * capture geometry and freshness.
+     */
     private fun quitShop(invocation: Invocation, state: String) {
+        val geometry = com.pyla.ai.capture.InputCoordinates.geometryGeneration
+        var ticket: MenuBackAdmission.Ticket? = null
+        var frameWidth = 0
+        var frameHeight = 0
+        for (attempt in 0 until MENU_BACK_RECHECK_FRAMES) {
+            if (!invocation.isLive) break
+            val frame = windowController.screenshot()
+            if (attempt > 0 && (frame.width != frameWidth || frame.height != frameHeight)) break
+            frameWidth = frame.width
+            frameHeight = frame.height
+            val mat = PylaUtils.frameToMat(frame)
+            val observation = try {
+                val observed = StateFinder.getStateObservation(mat, capturedAtMs = frame.capturedAtMs)
+                MenuBackAdmission.Observation(
+                    state = observed.state,
+                    menuControlPresent = observed.identity.menuControlPresent,
+                    independentControlPresent = observed.identity.confirmed,
+                    gameplayHudControl = observed.identity.gameplayControlPresent,
+                    capturedAtMs = frame.capturedAtMs,
+                    width = frame.width,
+                    height = frame.height,
+                )
+            } finally {
+                mat.release()
+            }
+            ticket = menuBackGate.observe(observation, android.os.SystemClock.elapsedRealtime())
+            if (attempt + 1 < MENU_BACK_RECHECK_FRAMES &&
+                !invocation.await(MENU_BACK_RECHECK_STEP_MS)
+            ) break
+        }
+        val granted = ticket
+        if (granted == null || granted.state != state) {
+            DiagnosticLog.sample(
+                "navigation.denied",
+                "phase=menu_back reason=menu_identity_unconfirmed state=$state",
+                10_000,
+            )
+            return
+        }
+        val guard = {
+            invocation.isLive && !closed && navigationAllowed() && getState() == state &&
+                com.pyla.ai.capture.InputCoordinates.geometryGeneration == geometry &&
+                com.pyla.ai.capture.InputCoordinates.captureWidth == frameWidth &&
+                com.pyla.ai.capture.InputCoordinates.captureHeight == frameHeight &&
+                menuBackGate.allows(granted, android.os.SystemClock.elapsedRealtime())
+        }
+        if (!guard()) {
+            DiagnosticLog.sample(
+                "navigation.denied",
+                "phase=menu_back reason=evidence_or_authority state=$state",
+                10_000,
+            )
+            return
+        }
+        DiagnosticLog.event(
+            "navigation.menu_back",
+            "state=$state reason=confirmed_menu_identity attempt=${granted.serial}",
+        )
         windowController.guardedNavigationTap(
             100f * windowController.heightRatio,
             60f * windowController.heightRatio,
-            invocation.action(state),
+            guard,
         )
         invocation.await(1_000)
     }
@@ -445,7 +553,11 @@ class StageManager(
 
             val path = PylaConfig.resolve("images/states/close_popup.png").absolutePath
             val raw = Imgcodecs.imread(path)
-            if (raw.empty()) { Log.w(TAG, "close_popup.png missing"); return }
+            if (raw.empty()) {
+                DiagnosticLog.failure("stage", "popup_close", "template_missing")
+                Log.w(TAG, "close_popup.png missing")
+                return
+            }
             val sf = windowController.scaleFactor.toDouble()
             val resized = Mat()
             org.opencv.imgproc.Imgproc.resize(raw, resized, org.opencv.core.Size(raw.cols() * sf, raw.rows() * sf))
@@ -461,6 +573,7 @@ class StageManager(
         org.opencv.imgproc.Imgproc.cvtColor(imageMat, imageGray, org.opencv.imgproc.Imgproc.COLOR_RGB2GRAY)
         imageMat.release()
         if (imageGray.cols() < template.cols() || imageGray.rows() < template.rows()) {
+            DiagnosticLog.failure("stage", "popup_close", "frame_smaller_than_template")
             imageGray.release(); return
         }
         val result = org.opencv.core.Mat()

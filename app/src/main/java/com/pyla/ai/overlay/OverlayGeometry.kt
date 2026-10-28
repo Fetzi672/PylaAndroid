@@ -36,19 +36,20 @@ data class ScreenGeometry(
 data class OverlayMetrics(
     val bubbleSizePx: Int,
     val controlSizePx: Int,
-    val statusHeightPx: Int,
+    val hudHeightPx: Int,
     val edgeMarginPx: Int,
     val controlGapPx: Int,
-    val statusTopGapPx: Int,
+    val hudTopGapPx: Int,
     val dragSlopPx: Int,
 ) {
     companion object {
         const val BUBBLE_DP = 48f
         const val CONTROL_DP = 48f
-        const val STATUS_DP = 28f
+        /** Compact row plus the reserved detail row: the bubble band never moves when it opens. */
+        const val HUD_MAX_DP = 68f
         const val EDGE_MARGIN_DP = 8f
         const val CONTROL_GAP_DP = 8f
-        const val STATUS_TOP_GAP_DP = 4f
+        const val HUD_TOP_GAP_DP = 4f
         const val DRAG_SLOP_DP = 6f
 
         fun forDensity(density: Float): OverlayMetrics {
@@ -57,10 +58,10 @@ data class OverlayMetrics(
             return OverlayMetrics(
                 bubbleSizePx = px(BUBBLE_DP),
                 controlSizePx = px(CONTROL_DP),
-                statusHeightPx = px(STATUS_DP),
+                hudHeightPx = px(HUD_MAX_DP),
                 edgeMarginPx = px(EDGE_MARGIN_DP),
                 controlGapPx = px(CONTROL_GAP_DP),
-                statusTopGapPx = px(STATUS_TOP_GAP_DP),
+                hudTopGapPx = px(HUD_TOP_GAP_DP),
                 dragSlopPx = px(DRAG_SLOP_DP),
             )
         }
@@ -81,10 +82,12 @@ object OverlayGeometry {
 
     /**
      * Vertical band (top inclusive, bottom exclusive) usable by the bubble and controls. It sits
-     * below the status strip (which is below the status bar / cutout) and above the navigation bar.
+     * below the HUD pill (which is below the status bar / cutout) and above the navigation bar.
+     * The reserved height covers the pill's optional detail row, so opening the controls never
+     * moves the bubble.
      */
     fun usableVerticalRange(g: ScreenGeometry, m: OverlayMetrics): OverlayRect {
-        val top = g.insetTopPx + m.statusTopGapPx + m.statusHeightPx + m.edgeMarginPx
+        val top = g.insetTopPx + m.hudTopGapPx + m.hudHeightPx + m.edgeMarginPx
         val bottom = (g.heightPx - g.insetBottomPx - m.edgeMarginPx).coerceAtLeast(top + 1)
         return OverlayRect(0, top, g.widthPx, bottom)
     }
@@ -137,28 +140,53 @@ object OverlayGeometry {
      * Index 0 = Start (top), 1 = Pause/Resume (middle), 2 = Stop (bottom).
      */
     fun controlRects(side: DockSide, g: ScreenGeometry, m: OverlayMetrics, relativeY: Float): List<OverlayRect> {
-        val size = m.controlSizePx
-        val gap = m.controlGapPx
         val bubble = bubbleRect(side, g, m, relativeY, 1f)
         val band = usableVerticalRange(g, m)
-        val columnHeight = size * 3 + gap * 2
+        val bandHeight = band.bottom - band.top
+        val gap = m.controlGapPx
+        val columnHeight = m.controlSizePx * 3 + gap * 2
+        // The reserved HUD band can be shorter than a full control column (very short displays).
+        // In that case the three cells shrink just enough to stay separated inside the band, instead
+        // of piling up as three overlapping windows half outside the safe area.
+        val shrunk = bandHeight < columnHeight
+        val shrinkGap = compactGap(bandHeight, gap)
+        val cell = if (shrunk) {
+            ((bandHeight - 2 * shrinkGap) / 3).coerceIn(1, minOf(m.controlSizePx, bandHeight))
+        } else {
+            m.controlSizePx
+        }
+        val step = cell + if (shrunk) shrinkGap else gap
+
+        val preferredLeft = if (side == DockSide.RIGHT) bubble.left - gap - cell else bubble.right + gap
+        val minLeft = g.insetLeftPx + m.edgeMarginPx
+        val maxLeft = (g.widthPx - g.insetRightPx - m.edgeMarginPx - cell).coerceAtLeast(minLeft)
+        val left = preferredLeft.coerceIn(minLeft, maxLeft)
+
+        if (shrunk) {
+            // Cells stay inside the band even when it is only a few pixels tall.
+            val lastTop = (band.bottom - cell).coerceAtLeast(band.top)
+            return (0..2).map { i ->
+                val top = (band.top + i * step).coerceIn(band.top, lastTop)
+                OverlayRect(left, top, left + cell, top + cell)
+            }
+        }
+
         val maxTop = (band.bottom - columnHeight).coerceAtLeast(band.top)
         val desiredTop = bubble.centerY - columnHeight / 2
         val columnTop = desiredTop.coerceIn(band.top, maxTop)
-        val controlTopMax = (band.bottom - size).coerceAtLeast(band.top)
-
-        val preferredLeft = if (side == DockSide.RIGHT) bubble.left - gap - size else bubble.right + gap
-        val minLeft = g.insetLeftPx + m.edgeMarginPx
-        val maxLeft = (g.widthPx - g.insetRightPx - m.edgeMarginPx - size).coerceAtLeast(minLeft)
-        val left = preferredLeft.coerceIn(minLeft, maxLeft)
+        val controlTopMax = (band.bottom - cell).coerceAtLeast(band.top)
 
         return (0..2).map { i ->
             // Evenly spaced when the column fits; individually clamped on very short displays so no
             // control ever leaves the safe area.
-            val top = (columnTop + i * (size + gap)).coerceIn(band.top, controlTopMax)
-            OverlayRect(left, top, left + size, top + size)
+            val top = (columnTop + i * (cell + gap)).coerceIn(band.top, controlTopMax)
+            OverlayRect(left, top, left + cell, top + cell)
         }
     }
+
+    /** Inter-control gap used when the column has to be compressed into a short band. */
+    private fun compactGap(bandHeight: Int, gap: Int): Int =
+        gap.coerceAtMost((bandHeight / 12).coerceAtLeast(2))
 
     /** Nearest horizontal side for a free-floating bubble centre. */
     fun snapSide(centerX: Int, g: ScreenGeometry): DockSide {
@@ -166,12 +194,20 @@ object OverlayGeometry {
         return if (centerX < mid) DockSide.LEFT else DockSide.RIGHT
     }
 
-    /** Full-width status strip rectangle directly below the status bar / cutout. */
-    fun statusRect(g: ScreenGeometry, m: OverlayMetrics): OverlayRect {
-        val top = g.insetTopPx + m.statusTopGapPx
-        val left = g.insetLeftPx
-        val right = (g.widthPx - g.insetRightPx).coerceAtLeast(left + 1)
-        return OverlayRect(left, top, right, top + m.statusHeightPx)
+    /**
+     * Horizontally centred pill rectangle inside the safe viewport (status bar, cutout and side
+     * insets excluded). The pill keeps its measured content width but can never be wider than the
+     * safe area minus the edge margins.
+     */
+    fun pillRect(g: ScreenGeometry, m: OverlayMetrics, widthPx: Int, heightPx: Int): OverlayRect {
+        val safeLeft = g.insetLeftPx
+        val safeRight = (g.widthPx - g.insetRightPx).coerceAtLeast(safeLeft + 1)
+        val maxWidth = (safeRight - safeLeft - 2 * m.edgeMarginPx).coerceAtLeast(1)
+        val width = widthPx.coerceIn(1, maxWidth)
+        val height = heightPx.coerceAtLeast(1)
+        val left = (safeLeft + (safeRight - safeLeft - width) / 2).coerceIn(safeLeft, safeRight - width)
+        val top = g.insetTopPx + m.hudTopGapPx
+        return OverlayRect(left, top, left + width, top + height)
     }
 
     /** True when a movement of (dx,dy) from the initial touch exceeds the drag slop. */

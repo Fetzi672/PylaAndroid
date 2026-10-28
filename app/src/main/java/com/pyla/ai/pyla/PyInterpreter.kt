@@ -2,6 +2,7 @@ package com.pyla.ai.pyla
 
 import kotlin.math.abs
 import kotlin.random.Random
+import java.math.BigInteger
 
 private class BreakSignal : RuntimeException()
 private class ContinueSignal : RuntimeException()
@@ -33,35 +34,49 @@ class PyFunction(
     val interp: PyInterpreter,
 ) : PyCallable {
     override fun call(args: List<Any>, kwargs: Map<String, Any>): Any {
-        val local = Scope(HashMap(), closure)
-        for ((idx, p) in params.withIndex()) {
-            val v: Any = when {
-                idx < args.size -> args[idx]
-                kwargs.containsKey(p.name) -> kwargs.getValue(p.name)
-                p.default != null -> interp.eval(p.default, closure)
-                else -> throw PyRuntimeError("$name() missing required argument '${p.name}'")
+        // Depth is bounded *before* the JVM stack can overflow, so runaway recursion reports a
+        // budget stop instead of being swallowed as a generic failure.
+        interp.enterFrame()
+        try {
+            val local = Scope(HashMap(), closure)
+            for ((idx, p) in params.withIndex()) {
+                val v: Any = when {
+                    idx < args.size -> args[idx]
+                    kwargs.containsKey(p.name) -> kwargs.getValue(p.name)
+                    p.default != null -> interp.eval(p.default, closure)
+                    else -> throw PyRuntimeError("$name() missing required argument '${p.name}'")
+                }
+                local.vars[p.name] = v
             }
-            local.vars[p.name] = v
-        }
-        return try {
-            interp.execBlock(body, local)
-            PyNone
-        } catch (r: ReturnSignal) {
-            r.value
+            return try {
+                interp.execBlock(body, local)
+                PyNone
+            } catch (r: ReturnSignal) {
+                r.value
+            }
+        } finally {
+            interp.exitFrame()
         }
     }
     override fun toString(): String = "<function $name>"
 }
 
-class PyInterpreter(val globals: Scope) {
+class PyInterpreter internal constructor(val globals: Scope, private val budget: PyExecutionBudget? = null) {
 
     private val rng = Random(System.nanoTime())
+
+    // ---- budget checkpoints (no-ops when constructed without a budget, e.g. legacy callers) ----
+
+    fun tick() { budget?.tick() }
+    fun enterFrame() { budget?.enterFrame() }
+    fun exitFrame() { budget?.exitFrame() }
 
     fun execBlock(stmts: List<Stmt>, scope: Scope) {
         for (s in stmts) exec(s, scope)
     }
 
     fun exec(stmt: Stmt, scope: Scope) {
+        tick()
         when (stmt) {
             is ExprStmt -> eval(stmt.expr, scope)
             is AssignStmt -> {
@@ -102,6 +117,7 @@ class PyInterpreter(val globals: Scope) {
         val iterable = Py.iterate(eval(stmt.iter, scope))
         var broke = false
         loop@ for (item in iterable) {
+            tick()
             assign(stmt.target, item, scope)
             try {
                 execBlock(stmt.body, scope)
@@ -115,6 +131,9 @@ class PyInterpreter(val globals: Scope) {
         var broke = false
         var guard = 0
         while (Py.truthy(eval(stmt.cond, scope))) {
+            tick()
+            // Secondary hard stop for the no-budget path; a real run hits its step budget long
+            // before this, so the bound is never the observable outcome in production.
             if (++guard > 5_000_000) throw PyRuntimeError("while loop exceeded iteration limit")
             try {
                 execBlock(stmt.body, scope)
@@ -158,6 +177,7 @@ class PyInterpreter(val globals: Scope) {
     // ---- evaluation ----
 
     fun eval(expr: Expr, scope: Scope): Any {
+        tick()
         return when (expr) {
             is NumLit -> expr.value
             is StrLit -> expr.value
@@ -263,10 +283,15 @@ class PyInterpreter(val globals: Scope) {
         val iterable = Py.iterate(eval(expr.iter, scope))
         val local = Scope(HashMap(), scope)
         for (item in iterable) {
+            tick()
             assign(expr.target, item, local)
             var keep = true
             for (c in expr.conditions) if (!Py.truthy(eval(c, local))) { keep = false; break }
-            if (keep) out.add(eval(expr.elt, local))
+            if (keep) {
+                budget?.guardSize(out.size + 1L)
+                budget?.charge(1L)
+                out.add(eval(expr.elt, local))
+            }
         }
         return PyList(out)
     }
@@ -278,7 +303,11 @@ class PyInterpreter(val globals: Scope) {
             for ((k, v) in expr.kwargs) put(k, eval(v, scope))
         }
         if (fn !is PyCallable) throw PyRuntimeError("'${Py.typeName(fn)}' object is not callable")
-        return fn.call(args, kwargs)
+        // Cancellation/deadline checked immediately before *and* after every native or script call.
+        budget?.beforeCall()
+        val result = fn.call(args, kwargs)
+        budget?.afterCall()
+        return result
     }
 
     // ---- attribute / method access ----
@@ -306,11 +335,15 @@ class PyInterpreter(val globals: Scope) {
             val key = a[0]
             val existing = d.map.entries.firstOrNull { Py.eq(it.key, key) }
             if (existing != null) existing.value
-            else { val def = arg(a, 1, PyNone); d.map[key] = def; def }
+            else {
+                guardSize(d.map.size.toLong() + 1L)
+                val def = arg(a, 1, PyNone); d.map[key] = def; def
+            }
         }
-        "keys" -> NativeFn("dict.keys") { _, _ -> PyList(ArrayList(d.map.keys)) }
-        "values" -> NativeFn("dict.values") { _, _ -> PyList(ArrayList(d.map.values)) }
+        "keys" -> NativeFn("dict.keys") { _, _ -> guardSize(d.map.size.toLong()); PyList(ArrayList(d.map.keys)) }
+        "values" -> NativeFn("dict.values") { _, _ -> guardSize(d.map.size.toLong()); PyList(ArrayList(d.map.values)) }
         "items" -> NativeFn("dict.items") { _, _ ->
+            guardSize(d.map.size.toLong())
             PyList(d.map.entries.map { PyTuple(listOf(it.key, it.value)) as Any }.toMutableList())
         }
         "pop" -> NativeFn("dict.pop") { a, _ ->
@@ -325,15 +358,25 @@ class PyInterpreter(val globals: Scope) {
             if (other is PyDict) for ((k, v) in other.map) Py.setIndex(d, k, v)
             PyNone
         }
-        "copy" -> NativeFn("dict.copy") { _, _ -> PyDict(LinkedHashMap(d.map)) }
+        "copy" -> NativeFn("dict.copy") { _, _ ->
+            guardSize(d.map.size.toLong()); PyDict(LinkedHashMap(d.map))
+        }
         "clear" -> NativeFn("dict.clear") { _, _ -> d.map.clear(); PyNone }
         "__contains__" -> NativeFn("dict.__contains__") { a, _ -> Py.contains(d, a[0]) }
         else -> throw PyRuntimeError("'dict' object has no attribute '$name'")
     }
 
     private fun listMethod(l: PyList, name: String): Any = when (name) {
-        "append" -> NativeFn("list.append") { a, _ -> l.items.add(a[0]); PyNone }
-        "extend" -> NativeFn("list.extend") { a, _ -> l.items.addAll(Py.iterate(a[0])); PyNone }
+        "append" -> NativeFn("list.append") { a, _ ->
+            guardSize(l.items.size.toLong() + 1L)
+            l.items.add(a[0]); PyNone
+        }
+        "extend" -> NativeFn("list.extend") { a, _ ->
+            val add = Py.iterate(a[0])
+            guardSize(l.items.size.toLong() + add.size)
+            charge(add.size.toLong())
+            l.items.addAll(add); PyNone
+        }
         "remove" -> NativeFn("list.remove") { a, _ ->
             val idx = l.items.indexOfFirst { Py.eq(it, a[0]) }
             if (idx < 0) throw PyRaiseException(PyException("ValueError", "list.remove(x): x not in list"))
@@ -349,6 +392,7 @@ class PyInterpreter(val globals: Scope) {
             if (i < 0) i += l.items.size
             if (i < 0) i = 0
             if (i > l.items.size) i = l.items.size
+            guardSize(l.items.size.toLong() + 1L)
             l.items.add(i, a[1]); PyNone
         }
         "index" -> NativeFn("list.index") { a, _ ->
@@ -359,7 +403,9 @@ class PyInterpreter(val globals: Scope) {
         "count" -> NativeFn("list.count") { a, _ -> l.items.count { Py.eq(it, a[0]) }.toLong() }
         "sort" -> NativeFn("list.sort") { _, kw -> sortInPlace(l.items, kw); PyNone }
         "reverse" -> NativeFn("list.reverse") { _, _ -> l.items.reverse(); PyNone }
-        "copy" -> NativeFn("list.copy") { _, _ -> PyList(ArrayList(l.items)) }
+        "copy" -> NativeFn("list.copy") { _, _ ->
+            guardSize(l.items.size.toLong()); PyList(ArrayList(l.items))
+        }
         "clear" -> NativeFn("list.clear") { _, _ -> l.items.clear(); PyNone }
         else -> throw PyRuntimeError("'list' object has no attribute '$name'")
     }
@@ -394,9 +440,24 @@ class PyInterpreter(val globals: Scope) {
         "split" -> NativeFn("str.split") { a, _ ->
             val parts = if (a.isEmpty() || a[0] is PyNone) s.trim().split(Regex("\\s+")).filter { it.isNotEmpty() }
             else s.split(a[0] as String)
+            guardSize(parts.size.toLong())
+            charge(parts.size.toLong())
             PyList(parts.mapTo(ArrayList(parts.size)) { it as Any })
         }
-        "replace" -> NativeFn("str.replace") { a, _ -> s.replace(a[0] as String, a[1] as String) }
+        "replace" -> NativeFn("str.replace") { a, _ ->
+            val old = a[0] as String; val new = a[1] as String
+            val occurrences = if (old.isEmpty()) s.length + 1 else {
+                var c = 0; var idx = s.indexOf(old)
+                while (idx >= 0) { c++; idx = s.indexOf(old, idx + old.length) }
+                c
+            }
+            // Projected result length is bounded before String.replace allocates it.
+            val projected = (s.length.toLong() + occurrences.toLong() * (new.length.toLong() - old.length.toLong()))
+                .coerceAtLeast(0L)
+            guardSize(projected)
+            charge(projected)
+            s.replace(old, new)
+        }
         "startswith" -> NativeFn("str.startswith") { a, _ -> s.startsWith(a[0] as String) }
         "endswith" -> NativeFn("str.endswith") { a, _ -> s.endsWith(a[0] as String) }
         "find" -> NativeFn("str.find") { a, _ -> s.indexOf(a[0] as String).toLong() }
@@ -407,7 +468,11 @@ class PyInterpreter(val globals: Scope) {
         }
         "capitalize" -> NativeFn("str.capitalize") { _, _ -> s.replaceFirstChar { it.uppercase() } }
         "join" -> NativeFn("str.join") { a, _ ->
-            Py.iterate(a[0]).joinToString(s) { Py.str(it) }
+            val parts = Py.iterate(a[0]).map { Py.str(it) }
+            val total = parts.sumOf { it.length.toLong() } + s.length.toLong() * maxOf(0, parts.size - 1)
+            guardSize(total)
+            charge(total)
+            parts.joinToString(s)
         }
         "format" -> NativeFn("str.format") { a, _ -> pyFormat(s, a) }
         else -> throw PyRuntimeError("'str' object has no attribute '$name'")
@@ -438,6 +503,10 @@ class PyInterpreter(val globals: Scope) {
     // ---- builtins / module registration ----
 
     companion object {
+
+        /** Allocation helpers for native builtins: charge the active run budget if one is bound. */
+        private fun guardSize(size: Long) { PyBudgetContext.current()?.guardSize(size) }
+        private fun charge(elements: Long) { PyBudgetContext.current()?.charge(elements) }
 
         fun buildGlobals(context: Map<String, Any>): Scope {
             val scope = Scope()
@@ -482,35 +551,54 @@ class PyInterpreter(val globals: Scope) {
             g["float"] = NativeFn("float") { a, _ -> if (a.isEmpty()) 0.0 else Py.toDouble(a[0]) }
             g["str"] = NativeFn("str") { a, _ -> if (a.isEmpty()) "" else Py.str(a[0]) }
             g["bool"] = NativeFn("bool") { a, _ -> if (a.isEmpty()) false else Py.truthy(a[0]) }
-            g["list"] = NativeFn("list") { a, _ -> if (a.isEmpty()) PyList() else PyList(Py.iterate(a[0]).toMutableList()) }
-            g["tuple"] = NativeFn("tuple") { a, _ -> if (a.isEmpty()) PyTuple(emptyList()) else PyTuple(Py.iterate(a[0])) }
+            g["list"] = NativeFn("list") { a, _ ->
+                if (a.isEmpty()) PyList() else {
+                    val items = Py.iterate(a[0])
+                    guardSize(items.size.toLong()); charge(items.size.toLong())
+                    PyList(items.toMutableList())
+                }
+            }
+            g["tuple"] = NativeFn("tuple") { a, _ ->
+                if (a.isEmpty()) PyTuple(emptyList()) else {
+                    val items = Py.iterate(a[0])
+                    guardSize(items.size.toLong()); charge(items.size.toLong())
+                    PyTuple(items)
+                }
+            }
             g["dict"] = NativeFn("dict") { a, kw ->
                 val m = LinkedHashMap<Any, Any>()
                 if (a.isNotEmpty() && a[0] is PyDict) m.putAll((a[0] as PyDict).map)
                 for ((k, v) in kw) m[k] = v
+                guardSize(m.size.toLong())
                 PyDict(m)
             }
             g["range"] = NativeFn("range") { a, _ -> rangeFn(a) }
             g["enumerate"] = NativeFn("enumerate") { a, _ ->
                 val start = if (a.size > 1) Py.toLong(a[1]) else 0L
+                val source = Py.iterate(a[0])
+                guardSize(source.size.toLong()); charge(source.size.toLong())
                 val out = ArrayList<Any>()
                 var idx = start
-                for (it in Py.iterate(a[0])) { out.add(PyTuple(listOf(idx, it))); idx++ }
+                for (it in source) { out.add(PyTuple(listOf(idx, it))); idx++ }
                 PyList(out)
             }
             g["zip"] = NativeFn("zip") { a, _ ->
                 val lists = a.map { Py.iterate(it) }
                 val n = lists.minOfOrNull { it.size } ?: 0
+                guardSize(n.toLong()); charge(n.toLong())
                 val out = ArrayList<Any>()
                 for (idx in 0 until n) out.add(PyTuple(lists.map { it[idx] }))
                 PyList(out)
             }
             g["map"] = NativeFn("map") { a, _ ->
                 val fn = a[0] as PyCallable
-                PyList(Py.iterate(a[1]).map { fn.call(listOf(it), emptyMap()) }.toMutableList())
+                val source = Py.iterate(a[1])
+                guardSize(source.size.toLong()); charge(source.size.toLong())
+                PyList(source.map { fn.call(listOf(it), emptyMap()) }.toMutableList())
             }
             g["sorted"] = NativeFn("sorted") { a, kw ->
                 val items = Py.iterate(a[0]).toMutableList()
+                guardSize(items.size.toLong()); charge(items.size.toLong())
                 val key = kw["key"]
                 val reverse = kw["reverse"]?.let { Py.truthy(it) } ?: false
                 val cmp = Comparator<Any> { x, y ->
@@ -549,17 +637,38 @@ class PyInterpreter(val globals: Scope) {
         }
 
         private fun rangeFn(a: List<Any>): PyList {
-            val out = ArrayList<Any>()
+            val start: Long
+            val stop: Long
+            val step: Long
             when (a.size) {
-                1 -> { var i = 0L; val n = Py.toLong(a[0]); while (i < n) { out.add(i); i++ } }
-                2 -> { var i = Py.toLong(a[0]); val n = Py.toLong(a[1]); while (i < n) { out.add(i); i++ } }
+                1 -> { start = 0L; stop = Py.toLong(a[0]); step = 1L }
+                2 -> { start = Py.toLong(a[0]); stop = Py.toLong(a[1]); step = 1L }
                 else -> {
-                    var i = Py.toLong(a[0]); val n = Py.toLong(a[1]); val step = Py.toLong(a[2])
+                    start = Py.toLong(a[0]); stop = Py.toLong(a[1]); step = Py.toLong(a[2])
                     if (step == 0L) throw PyRaiseException(PyException("ValueError", "range() arg 3 must not be zero"))
-                    if (step > 0) while (i < n) { out.add(i); i += step } else while (i > n) { out.add(i); i += step }
                 }
             }
+            // Count is computed exactly (BigInteger, no overflow) and checked against the collection
+            // cap BEFORE any element is allocated: range(10**7) can no longer build a giant PyList.
+            val limit = (PyBudgetContext.current()?.maxCollection ?: PyExecutionBudget.DEFAULT_MAX_COLLECTION).toLong()
+            val count = rangeCount(start, stop, step, limit)
+            guardSize(count)
+            charge(count)
+            val out = ArrayList<Any>(count.toInt())
+            var i = start
+            var produced = 0L
+            while (produced < count) { out.add(i); i += step; produced++ }
             return PyList(out)
+        }
+
+        private fun rangeCount(start: Long, stop: Long, step: Long, limit: Long): Long {
+            if (step > 0 && start >= stop) return 0L
+            if (step < 0 && start <= stop) return 0L
+            val span = BigInteger.valueOf(stop).subtract(BigInteger.valueOf(start)).abs()
+            val stride = BigInteger.valueOf(step).abs()
+            val count = span.add(stride).subtract(BigInteger.ONE).divide(stride)
+            if (count > BigInteger.valueOf(limit)) throw PyBudgetExceededException(PyBudgetKind.COLLECTION)
+            return count.toLong()
         }
 
         private fun minMax(a: List<Any>, kw: Map<String, Any>, isMin: Boolean): Any {

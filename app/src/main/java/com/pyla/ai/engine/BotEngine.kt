@@ -1,5 +1,7 @@
 package com.pyla.ai.engine
 
+import com.pyla.ai.diagnostics.PipelineTimingTelemetry
+
 import android.content.Context
 import android.os.Handler
 import android.os.HandlerThread
@@ -15,6 +17,7 @@ import com.pyla.ai.diagnostics.DiagnosticLog
 import com.pyla.ai.pyla.PlaystyleRegistry
 import org.json.JSONArray
 import org.json.JSONObject
+import org.opencv.core.Mat
 import java.io.File
 import java.util.concurrent.atomic.AtomicBoolean
 
@@ -93,6 +96,7 @@ class BotEngine(
                 }
                 out
             } catch (t: Throwable) {
+                DiagnosticLog.failure("engine", "queue_load", "json_decode_threw", t)
                 Log.w(TAG, "load queue: ${t.message}")
                 mutableListOf()
             }
@@ -161,6 +165,41 @@ class BotEngine(
         return snapshot.state
     }
 
+    /**
+     * Classify one frame and apply positive game/menu arbitration before the result is allowed to
+     * touch authoritative state.
+     *
+     * The 3.0.4 Trio follower sequence was: admitted MATCH, a single heart-template
+     * `brawler_selection` classification on an in-match frame, match authority revoked, and eleven
+     * upper-left BACK taps. Play's admitted gameplay evidence is stronger than one ambiguous menu
+     * template, so an UNCORROBORATED ambiguous-menu classification is reported as `unknown` while
+     * that evidence is still fresh: by [GameStateAuthority]'s own contract `unknown` can neither
+     * grant nor revoke gameplay, so the match survives and no menu navigation is dispatched.
+     * Corroborated menu identity (two independent menu controls, no HUD control) is passed through
+     * unchanged, so real lobby/shop/list transitions are not delayed.
+     */
+    private fun classifyAdmitted(mat: Mat, chaosGeneration: Long?, capturedAtMs: Long): String {
+        val observation = StateFinder.getStateObservation(mat, chaosGeneration, capturedAtMs)
+        val priorState = latestState
+        val priorAt = latestObservationAtMs
+        val admitted = MenuMatchArbitration.menuMayDisplaceMatch(
+            priorState = priorState,
+            priorEvidenceAtMs = priorAt,
+            nowMs = SystemClock.elapsedRealtime(),
+            observedState = observation.state,
+            identity = observation.identity,
+        )
+        if (!admitted) {
+            DiagnosticLog.sample(
+                "state.menu_unconfirmed",
+                "state=${observation.state} prior=$priorState level=${observation.identity.level}",
+                5_000,
+            )
+            return "unknown"
+        }
+        return observation.state
+    }
+
     private lateinit var windowController: WindowController
     private lateinit var timeManagement: TimeManagement
     private lateinit var lobbyAutomator: LobbyAutomation
@@ -183,8 +222,15 @@ class BotEngine(
     }
     private var crashCheckIntervalMs = 5_000L
 
-    private val gamePackage: String get() = try { GameLauncher.gamePackage() } catch (_: Throwable) { GameLauncher.DEFAULT_PACKAGE }
-    private val runForMinutes: Int get() = try { PylaConfig.load("cfg/general_config.toml").getInt("run_for_minutes", 0) } catch (_: Throwable) { 0 }
+    private val gamePackage: String get() = try { GameLauncher.gamePackage() } catch (t: Throwable) {
+        // Read on the hot loop: rate-limited so a broken config cannot flood the bounded log.
+        DiagnosticLog.sample("engine.setting_denied", "setting=game_package", 60_000)
+        GameLauncher.DEFAULT_PACKAGE
+    }
+    private val runForMinutes: Int get() = try { PylaConfig.load("cfg/general_config.toml").getInt("run_for_minutes", 0) } catch (t: Throwable) {
+        DiagnosticLog.sample("engine.setting_denied", "setting=run_for_minutes", 60_000)
+        0
+    }
     private var lastGameLaunchMs = 0L
     private var matchLoopMs = 0L
     private var matchLoopSamples = 0
@@ -201,9 +247,11 @@ class BotEngine(
             }
         }
         if (!claimed) {
+            DiagnosticLog.failure("engine", "start", "ownership_unavailable")
             PylaLog.w(TAG, "start() ignored: engine ownership is unavailable")
             return
         }
+        PipelineTimingTelemetry.reset()
         // Session replacement: a new run must not inherit the previous run's Chaosdrop evidence.
         synchronized(sessionOwnershipLock) {
             if (instance === this) PhoneVisualCues.revokeChaosContinuation()
@@ -217,6 +265,9 @@ class BotEngine(
         BotStatus.lastError = ""
         BotStatus.resetVerification()
         BotStatus.publish(RuntimeState.UNKNOWN, VerificationPhase.LOADING, false)
+        // New run: drop every previous run's HUD sample. Writers that started before this reset hold
+        // the older generation and their samples are discarded on completion.
+        resetHudTelemetry(announcePlaystyle = false)
         stateAuthority.reset()
         BotStatus.bindGameplayStatusGuard { gameplayInputAllowed() }
         BotStatus.inputConnected = com.pyla.ai.input.InputService.isConnected()
@@ -225,17 +276,21 @@ class BotEngine(
         DiagnosticLog.event("engine.start", "game=$gamePackage queue=${queueData.size} input=${BotStatus.inputConnected}")
         PylaLog.p(TAG, "Auto-opening Brawl Stars ($gamePackage)")
         val startup = sessionAuthority.beginRequest()
-        if (startup != null && startup.allows() && GameLauncher.launch(appContext, gamePackage)) {
-            lastGameLaunchMs = System.currentTimeMillis()
+        if (startup != null && startup.allows()) {
+            if (GameLauncher.launch(appContext, gamePackage)) lastGameLaunchMs = System.currentTimeMillis()
+            else DiagnosticLog.failure("engine", "start", "game_launch_refused")
+        } else {
+            DiagnosticLog.failure("engine", "start", "authority_refused")
         }
         loopThread = HandlerThread("pyla-bot-loop").apply { start() }
         val posted = Handler(loopThread.looper).post {
             try {
                 bootstrapAndRun()
             } catch (t: Throwable) {
+                DiagnosticLog.failure("engine", "bootstrap", "unhandled", t)
                 PylaLog.e(TAG, "engine bootstrap failed", t)
                 if (instance === this) BotStatus.error("Engine start failed: ${t.message}")
-                try { stop() } catch (_: Throwable) {}
+                try { stop("bootstrap_failure") } catch (_: Throwable) {}
             } finally {
                 cleanupResources()
                 // If the state worker never started (early return, or its post was refused) it can
@@ -245,6 +300,7 @@ class BotEngine(
             }
         }
         if (!posted) {
+            DiagnosticLog.failure("engine", "main_worker", "post_refused")
             // The loop thread was not running: the bootstrap can never execute. Settle now so a
             // following start() is not blocked by a phantom active session.
             if (!stateWorkerStarted) markStateCheckerSettled()
@@ -257,9 +313,10 @@ class BotEngine(
         var capture = CaptureService.instance
         while (capture == null && !stopRequested.get()) {
             if (System.currentTimeMillis() > deadlineMs) {
+                DiagnosticLog.failure("engine", "capture_start", "timeout")
                 Log.e(TAG, "CaptureService did not come up within ${CAPTURE_STARTUP_TIMEOUT_MS / 1000}s")
                 BotStatus.error("CaptureService not running (screen capture permission not granted?)")
-                stop()
+                stop("capture_unavailable")
                 return
             }
             try { Thread.sleep(50) } catch (_: InterruptedException) { return }
@@ -286,6 +343,7 @@ class BotEngine(
         val selectedPlaystyle = PlaystyleSelection.effectivePlaystyle()
         var pylaScript = PlaystyleRegistry.load(selectedPlaystyle)
         if (pylaScript == null && selectedPlaystyle != PlaystyleRegistry.DEFAULT_PLAYSTYLE) {
+            DiagnosticLog.failure("engine", "playstyle", "requested_unavailable")
             PylaLog.w(TAG, "Playstyle '$selectedPlaystyle' failed to load, falling back to default")
             pylaScript = PlaystyleRegistry.load(PlaystyleRegistry.DEFAULT_PLAYSTYLE)
         }
@@ -293,17 +351,20 @@ class BotEngine(
             pylaScript = PlaystyleRegistry.listMeta().firstOrNull()?.let { PlaystyleRegistry.load(it.filename) }
         }
         if (pylaScript == null) {
+            DiagnosticLog.failure("engine", "playstyle", "unavailable")
             BotStatus.error("No playstyle (.pyla) could be loaded")
             PylaLog.e(TAG, "No .pyla playstyle available; aborting start")
-            stop()
+            stop("no_playstyle")
             return
         }
         DiagnosticLog.event(
             "playstyle.selected",
-            "requested=$selectedPlaystyle name=${pylaScript.meta.displayName} " +
-                "gamemodes=${pylaScript.meta.gamemodes} fallback=${selectedPlaystyle != pylaScript.meta.displayName}",
+            "requested=$selectedPlaystyle loaded=${pylaScript.meta.filename} name=${pylaScript.meta.displayName} " +
+                "gamemodes=${pylaScript.meta.gamemodes} fallback=${selectedPlaystyle != pylaScript.meta.filename}",
         )
         PylaLog.p(TAG, "Selected playstyle: ${pylaScript.meta.displayName} (gamemodes=${pylaScript.meta.gamemodes})")
+        // Actual loaded metadata (a failed requested style falls back), never the requested name.
+        runCatching { HudTelemetry.recordPlaystyle(HudTelemetry.generation(), pylaScript.meta.displayName) }
 
         applyConfiguredPlayOrder()
         val playstyleInfo = HashMap<String, Any>()
@@ -344,11 +405,22 @@ class BotEngine(
             }
         }
         stateWorkerStarted = statePosted
-        if (!statePosted) PylaLog.w(TAG, "state checker post refused; it will be settled by bootstrap")
+        if (!statePosted) {
+            DiagnosticLog.failure("engine", "state_worker", "post_refused")
+            PylaLog.w(TAG, "state checker post refused; it will be settled by bootstrap")
+        }
 
         PylaLog.p(TAG, "Initialization complete, starting main loop. queue=${queueData.size} brawlers")
         queueData.forEachIndexed { i, m -> PylaLog.p(TAG, "queue[$i]: brawler=${m["brawler"]} type=${m["type"]} trophies=${m["trophies"]} push_until=${m["push_until"]} auto=${m["automatically_pick"]}") }
         mainLoop()
+    }
+
+    /** Caller-attributed stop: one fixed, never-folded reason code, then the identical stop path. */
+    fun stop(cause: String) {
+        // Revoke/release first. Text observation must not precede the existing STOP boundary.
+        try { stop() } finally {
+            DiagnosticLog.terminal("engine", "stop", "requested", cause)
+        }
     }
 
     fun stop() {
@@ -380,6 +452,11 @@ class BotEngine(
             BotStatus.enginePaused = false
             BotStatus.currentState = ""
             BotStatus.resetVerification()
+            resetHudTelemetry(announcePlaystyle = false)
+        }
+        if (owner && firstStop) {
+            PipelineTimingTelemetry.interruption("STOP")
+            PipelineTimingTelemetry.flush()
         }
         DiagnosticLog.event("engine.stop", "stopRequested=${stopRequested.get()}")
         Log.i(TAG, "Bot engine stopped")
@@ -417,9 +494,24 @@ class BotEngine(
     }
 
     private fun cleanupResources() {
-        try { if (::play.isInitialized) play.close() } catch (t: Throwable) { Log.w(TAG, "play cleanup: ${t.message}") }
-        try { if (::lobbyAutomator.isInitialized) lobbyAutomator.close() } catch (t: Throwable) { Log.w(TAG, "OCR cleanup: ${t.message}") }
-        try { if (::stageManager.isInitialized) stageManager.close() } catch (t: Throwable) { Log.w(TAG, "stage cleanup: ${t.message}") }
+        try {
+            if (::play.isInitialized) play.close()
+        } catch (t: Throwable) {
+            DiagnosticLog.failure("engine", "cleanup", "play_close_threw", t)
+            Log.w(TAG, "play cleanup: ${t.message}")
+        }
+        try {
+            if (::lobbyAutomator.isInitialized) lobbyAutomator.close()
+        } catch (t: Throwable) {
+            DiagnosticLog.failure("engine", "cleanup", "lobby_close_threw", t)
+            Log.w(TAG, "OCR cleanup: ${t.message}")
+        }
+        try {
+            if (::stageManager.isInitialized) stageManager.close()
+        } catch (t: Throwable) {
+            DiagnosticLog.failure("engine", "cleanup", "stage_close_threw", t)
+            Log.w(TAG, "stage cleanup: ${t.message}")
+        }
     }
 
     fun setPaused(p: Boolean) {
@@ -442,11 +534,31 @@ class BotEngine(
             if (p && ::play.isInitialized) play.resetCombat()
             if (p && ::windowController.isInitialized) windowController.releaseMovement()
             BotStatus.enginePaused = p && BotStatus.engineRunning
+            // Pause and resume are both lifecycle boundaries: nothing measured before either may be
+            // presented afterwards. Resume re-announces the already loaded playstyle metadata.
+            resetHudTelemetry(announcePlaystyle = !p)
             BotStatus.action(if (p) "Bot paused" else "Bot resumed")
+            if (p) {
+                PipelineTimingTelemetry.interruption("PAUSED")
+                PipelineTimingTelemetry.flush()
+            }
         }
     }
 
     fun isPaused(): Boolean = paused.get()
+
+    /**
+     * HUD telemetry lifecycle boundary. Resetting advances the telemetry generation, so a loop
+     * iteration or gameplay frame that started before this point can no longer publish its sample.
+     * [announcePlaystyle] re-publishes the already loaded script metadata on resume; without it the
+     * detail row would stay empty until the next playstyle change.
+     */
+    private fun resetHudTelemetry(announcePlaystyle: Boolean) {
+        HudTelemetry.reset()
+        if (!announcePlaystyle) return
+        val script = try { if (::play.isInitialized) play.pylaScript else null } catch (_: Throwable) { null }
+        if (script != null) HudTelemetry.recordPlaystyle(HudTelemetry.generation(), script.meta.displayName)
+    }
 
     private fun stateCheckerLoop() {
         var loggedNoCapture = false
@@ -484,7 +596,10 @@ class BotEngine(
                 val gameInFront = fg == null || fg == gamePackage || fg == appContext.packageName
                 val capture = CaptureService.instance
                 if (capture == null) {
-                    if (!loggedNoCapture) { PylaLog.w(TAG, "state checker: CaptureService.instance is null"); loggedNoCapture = true }
+                    if (!loggedNoCapture) {
+                        DiagnosticLog.sample("engine.capture_unavailable", "phase=state_checker reason=service_absent", 30_000)
+                        PylaLog.w(TAG, "state checker: CaptureService.instance is null"); loggedNoCapture = true
+                    }
                 } else if (gameInFront && now - lastStateCheckMs >=
                     if (latestState == null || latestState == "unknown") minOf(stateCheckIntervalMs, 500L) else stateCheckIntervalMs) {
                     loggedNoCapture = false
@@ -500,7 +615,7 @@ class BotEngine(
                         lastStateCheckMs = now
                         if (!loggedFirstFrame) { PylaLog.p(TAG, "state checker received first frame ${copied.width}x${copied.height}"); loggedFirstFrame = true }
                         val mat = PylaUtils.argbToRgbMat(copied.rgbBuffer, copied.width, copied.height)
-                        val observed = StateFinder.getState(mat, chaosGeneration, copied.capturedAtMs)
+                        val observed = classifyAdmitted(mat, chaosGeneration, copied.capturedAtMs)
                         // Snapshot the *previous* admitted evidence before this frame can overwrite
                         // it. The recovery below is about a match that was positively admitted and
                         // has since stopped producing detections, so it must be judged on what was
@@ -535,7 +650,12 @@ class BotEngine(
                                         SystemClock.elapsedRealtime() - capturedAtMs in 0L..WindowController.FRAME_STALE_TIMEOUT_MS
                                 }
                             }
-                            try { lobbyAutomator.checkForIdle(mat, idleGuard) } catch (t: Throwable) { PylaLog.w(TAG, "idle check: ${t.message}") }
+                            try {
+                                lobbyAutomator.checkForIdle(mat, idleGuard)
+                            } catch (t: Throwable) {
+                                DiagnosticLog.failure("engine", "idle_check", "threw", t)
+                                PylaLog.w(TAG, "idle check: ${t.message}")
+                            }
                         }
                         mat.release()
                         if (now - lastNoDetectionsCheckMs >= noDetectionsCheckIntervalMs) {
@@ -558,7 +678,10 @@ class BotEngine(
                                     val timeout = NO_DETECTIONS_ACTION_THRESHOLD_SEC.toInt()
                                     PylaLog.w(TAG, "No detections for ${timeout}s in match, reopening Brawl Stars")
                                     BotStatus.action("No detections for ${timeout}s, reopening Brawl Stars")
-                                    if (recoveryGuard() && GameLauncher.launch(appContext, gamePackage)) lastGameLaunchMs = now
+                                    if (recoveryGuard()) {
+                                        if (GameLauncher.launch(appContext, gamePackage)) lastGameLaunchMs = now
+                                        else DiagnosticLog.failure("engine", "no_detections", "game_launch_refused")
+                                    }
                                     for (k in play.timeSinceDetections.keys) play.timeSinceDetections[k] = t
                                 }
                             }
@@ -566,6 +689,7 @@ class BotEngine(
                     }
                 }
             } catch (t: Throwable) {
+                DiagnosticLog.failure("engine", "state_checker", "unhandled", t)
                 PylaLog.e(TAG, "state checker exception", t)
             }
             try { Thread.sleep(100) } catch (_: InterruptedException) {}
@@ -592,7 +716,10 @@ class BotEngine(
         // and here must deny the launch).
         if (!bound.allows()) return
         BotStatus.action("Relaunching Brawl Stars (foreground was $fg)")
-        if (bound.allows() && GameLauncher.launch(appContext, gamePackage)) lastGameLaunchMs = now
+        if (bound.allows()) {
+            if (GameLauncher.launch(appContext, gamePackage)) lastGameLaunchMs = now
+            else DiagnosticLog.failure("engine", "watchdog", "game_launch_refused")
+        }
     }
 
     private fun mainLoop() {
@@ -622,6 +749,9 @@ class BotEngine(
             val iteration = sessionAuthority.beginRequest() ?: return
             val observationRevision = synchronized(stateLock) { stateRevision }
             val iterationStartNs = System.nanoTime()
+            // HUD telemetry generation bound to this iteration: a Pause/Stop/start that resets the
+            // recorder supersedes this value, so a late sample can never publish into a newer run.
+            val telemetryCycle = HudTelemetry.generation()
             try {
                 // Captured BEFORE the screenshot so a classification that straddled a Pause/Stop is
                 // bound to (and rejected by) the superseded Chaosdrop lifecycle generation.
@@ -639,7 +769,7 @@ class BotEngine(
                 if (state == null) { Thread.sleep(50); continue }
                 if (state != "match" && state != "unknown") {
                     val currentMat = PylaUtils.frameToMat(frame)
-                    val observedNow = try { StateFinder.getState(currentMat, chaosGeneration, frame.capturedAtMs) } finally { currentMat.release() }
+                    val observedNow = try { classifyAdmitted(currentMat, chaosGeneration, frame.capturedAtMs) } finally { currentMat.release() }
                     state = observeState(observedNow, frame.capturedAtMs, expectedRevision = observationRevision) ?: "unknown"
                 }
                 if (state != "match" && state != "unknown" &&
@@ -667,7 +797,11 @@ class BotEngine(
 
                 if (state == "lobby" && !pickedFirstBrawler) {
                     val first = stageManager.brawlersPickData.firstOrNull()
-                    if (first == null) { PylaLog.w(TAG, "Empty queue -- stopping"); stop(); return }
+                    if (first == null) {
+                        PylaLog.w(TAG, "Empty queue -- stopping")
+                        stop("empty_queue")
+                        return
+                    }
                     pickedFirstBrawler = true
                     stageManager.updateTrophyObserver()
                     val autoPick = toBool(first["automatically_pick"], false)
@@ -694,7 +828,7 @@ class BotEngine(
                 }
                 if (inCooldown && System.currentTimeMillis() - cooldownStartMs >= cooldownDurationMs) {
                     Log.i(TAG, "cooldown over, stopping bot")
-                    stop(); return
+                    stop("run_for_minutes"); return
                 }
 
                 // Re-check ownership/flags AFTER capture and long processing and BEFORE entering the
@@ -720,24 +854,49 @@ class BotEngine(
                         PylaLog.p(TAG, "match loop avg ${avg}ms (~${"%.1f".format(1000.0 / avg.coerceAtLeast(1))} fps)")
                         matchLoopMs = 0; matchLoopSamples = 0
                     }
+                    // One completed gameplay-processing call: counts towards IPS and refreshes the
+                    // capture-age sample. Stages this engine cannot measure stay unavailable (null)
+                    // rather than inheriting another frame's cost.
+                    runCatching {
+                        val completedAtMs = SystemClock.elapsedRealtime()
+                        HudTelemetry.recordGameplayFrame(
+                            telemetryCycle, completedAtMs,
+                            frameAgeMs = (completedAtMs - frame.capturedAtMs).takeIf { it >= 0L },
+                        )
+                    }
                 } else if (state != "match_making") {
                     play.resetCombat()
                     windowController.releaseMovement()
                     BotStatus.publish(RuntimeState.fromClassifier(state), VerificationPhase.VERIFIED, true)
                     PylaLog.p(TAG, "main loop: dispatching state=$state to StageManager")
-                    stageManager.doState(state)
+                    try {
+                        stageManager.doState(state)
+                    } catch (t: Throwable) {
+                        // Caller-specific attribution for a Stage failure; the throw itself is unchanged.
+                        DiagnosticLog.failure("engine", "stage_dispatch", "threw", t)
+                        throw t
+                    }
+                }
+
+                // LOOP processing time: the iteration body above, excluding the throttle sleep that
+                // follows. Observation only; it never influences the throttle target itself.
+                runCatching {
+                    val elapsedNs = System.nanoTime() - iterationStartNs
+                    HudTelemetry.recordLoop(telemetryCycle, SystemClock.elapsedRealtime(), elapsedNs / 1_000_000.0)
                 }
             } catch (t: Throwable) {
                 if (t is BrawlerSelectionFailedException) {
+                    DiagnosticLog.failure("engine", "main_loop", "brawler_selection_unverified", t)
                     if (instance === this) BotStatus.error("Brawler selection could not be verified. Bot stopped; check the selection and press START again.")
                     PylaLog.w(TAG, "Unverified brawler selection (${t.reason}); refusing to start a match")
-                    stop()
+                    stop("brawler_selection_unverified")
                     return
                 }
                 if (t is IllegalStateException && t.message?.contains("push targets reached") == true) {
+                    DiagnosticLog.failure("engine", "main_loop", "push_targets_reached", t)
                     PylaLog.p(TAG, "All brawler push targets reached, stopping the bot")
                     if (instance === this) BotStatus.error("All brawler push targets reached, bot stopped")
-                    stop()
+                    stop("push_targets_reached")
                     return
                 }
                 // Observation failure revokes pending combat as well as movement.
@@ -745,6 +904,7 @@ class BotEngine(
                 try { windowController.releaseMovement() } catch (_: Throwable) {}
                 play.gameplayEvidence.reset()
                 stateAuthority.invalidate(SystemClock.elapsedRealtime())
+                DiagnosticLog.failure("engine", "main_loop", "unhandled", t)
                 if (instance === this) BotStatus.publish(RuntimeState.UNKNOWN, VerificationPhase.VERIFY_STATE, false)
                 PylaLog.e(TAG, "main loop error: ${t.message}", t)
                 try { Thread.sleep(50) } catch (_: InterruptedException) {}
