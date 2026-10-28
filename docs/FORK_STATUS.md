@@ -12,7 +12,8 @@ Everything here is early beta. Treat every run as supervised. The project does n
 ## License and attribution
 
 - Original attribution and the upstream project link are preserved.
-- The project is licensed under the **CC BY-NC 4.0** [CC BY-NC 4.0](https://creativecommons.org/licenses/by-nc/4.0/)
+- Current development uses **ANCS-1.0**; see [LICENSE](../LICENSE).
+- This does not rewrite historical tags, APKs or previously granted rights. The preceding CC BY-NC 4.0 text is retained in [licenses/CC-BY-NC-4.0.txt](../licenses/CC-BY-NC-4.0.txt). Third-party materials remain subject to their applicable terms; see [LICENSE_SCOPE.md](LICENSE_SCOPE.md).
 
 ## What works today
 
